@@ -64,7 +64,6 @@ git clone https://github.com/89630618/claudio-radio-wanfeng.git
 cd claudio-radio-wanfeng
 Copy-Item .env.example .env
 npm ci
-npm run build
 npm run dev
 ```
 
@@ -77,7 +76,6 @@ git clone https://github.com/89630618/claudio-radio-wanfeng.git
 cd claudio-radio-wanfeng
 cp .env.example .env
 npm ci
-npm run build
 npm run dev
 ```
 
@@ -154,7 +152,7 @@ npm run build
 
 统一测试入口使用临时数据目录，分别运行包、服务端和UI测试并报告跳过项。KuGou上游兼容测试需要固定源码checkout：设置 `CLAUDIO_KUGOU_API_REVIEWED_DIR` 后可加 `--require-upstream`，缺失时不能把跳过说成已验证。浏览器执行器验证入口为 `npm run test:browser`，需可用的Chromium；具体运行证据与能力限制见统一实施方案。
 
-旧 `smoke` 脚本与DJ质量脚本不是新核心的完整验收。旧smoke会写入其配置的数据目录；DJ质量脚本依赖配置的曲库与外部服务。常规回归使用上述隔离测试入口；脚本参数以 `package.json` 和对应源码为准。
+`npm run smoke` 已通过隔离包装器运行旧模块检查：临时工作目录、空凭据、只允许回环网络，默认清理生成的数据；它不是新核心的完整验收。DJ质量脚本仍依赖配置的曲库与外部服务。常规回归使用上述统一测试入口；生产构建后可执行 `npm run verify:artifact` 检查脱离源码的模块导入。CI固定Node和KuGou上游版本，要求上游兼容测试实际运行。开发命令直接解析workspace源码，无需先build。
 
 可选Folia舞台使用独立仓库的已验证构建，导出到被git忽略的静态目录：
 

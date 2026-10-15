@@ -314,9 +314,9 @@ R1允许先用fixture推进，不再要求先把旧播放器改正确。旧版�
 | R1a 共享合同与纯核心初版 | Opus已实施；包含decoder与seek窗口修复，尚未接入现有UI | 71项新测试、包类型检查、依赖边界检查及隔离生产build通过；这是可回退的代码检查点，不是R1全部验收 |
 | R1b 媒体事实与字幕边界 | Opus已修复自然结束pause→ended、真实时长优先级、歌词录音身份、voice实际状态及资产共享 | 95项包/边界测试、类型检查、隔离生产build通过；8项变异检查均捕获回归 |
 | R1c 队列与转场确认收口 | 已提交`b3e2ff0`；耗尽意图、preroll截止、实际录音连续性及暂停/seek确认已实现 | 124项测试、类型检查、隔离build通过，19项变异捕获；独立复现的同load旧playing误记started仍在下一片处理 |
-| R1d 完整UI所需合同 | `6d6748c`：手动voice、原子队列替换、候选ID预留/一次认领与停止态恢复已实施；共享HTTP与now generation另存`1721113` | 独立32条定向检查、7,457步有界状态检查通过；播放事件归因与aborted终态仍待收口，不能把阶段提交当终验 |
-| R2 浏览器执行器 | 初版`1c675a4`，加固`020cd22`：锁初始化失败释放、late runtime回收、receipt取消、观察时钟与输出挂起处理已实施 | 原R1预览12项浏览器场景通过不算当前主仓成绩。当前冻结driver原生18场景另查到外部pause/seek归因与旧ended污染恢复意图，续作修复后须再验 |
-| R3 服务端 | `848d0a1`完成文件身份、并发候选、now代际、handle激活、DJ上下文等加固；`cb936b9`统一共享路径/decoder与隔离测试发现 | 当前125项server测试通过（固定KuGou上游源码mock兼容3项实际运行、零skip）；独立复查新增GC受保护首批饿死、HEAD未释放Web Stream，仍待修。真实DJ出站prompt链、library公开ref还待接完 |
+| R1d 完整UI所需合同 | `6d6748c`：手动voice、原子队列替换、候选ID预留/一次认领与停止态恢复已实施；共享HTTP与now generation另存`1721113` | 独立32条定向检查、7,457步有界状态检查通过；播放事件归因与aborted终态已在后续`f2c839e`收口；本行保留原检查点范围 |
+| R2 浏览器执行器 | 初版`1c675a4`，加固`020cd22`：锁初始化失败释放、late runtime回收、receipt取消、观察时钟与输出挂起处理已实施 | 后续`f2c839e`修复原生事件归因、aborted暂停恢复和共享seekEpoch：233项包测试、15项主仓浏览器场景通过；独立冻结重验18项原生浏览器及6项恢复模型通过。合成音频不等于物理设备中断验收 |
+| R3 服务端 | `848d0a1`完成文件身份、并发候选、now代际、handle激活、DJ上下文等加固；`cb936b9`统一共享路径/decoder与隔离测试发现 | 后续`a3fb788`、`7c81a5f`修GC/stream释放，`db4dfb8`验证真实DJ请求组装，`06b87ab`完成公开library ref及未知source保真。132项server测试零skip；独立HTTP/SQLite与stream回归通过。新预算切片另待验收 |
 | R3 完整UI切换 | `d2a0067`移除旧App/useAudio/AudioPlayer编排，接新runtime、v1 ports、两字幕与Folia pin；`6c60bf5`增加统一隔离测试入口 | 当前46项UI测试通过；中间版本真实browser基础播放/手动DJ/双页通过，但尚非终验。已复现媒体键反向动作、pending radio暂停后仍开播、library无ref导致迁移/喜欢失效；另待now冲突恢复、舞台ready与observer seek收口 |
 | R4 Folia舞台 | 独立仓修复版`0d33b05`，48单测、67项浏览器检查通过；干净提交已重建并导出 | 原生Lattice、失败恢复、完整对应源码包、依赖许可校验已落地；contractVersion=2。主仓adapter接线中，AGPL源码/产物不提交主仓 |
 | R5 日常观察 | 未开始 | 需真实使用时间，不能压缩成自动测试结果 |
@@ -325,11 +325,13 @@ R1允许先用fixture推进，不再要求先把旧播放器改正确。旧版�
 
 **当前可回退集成检查点：`6c60bf5`。** 同一工作树的包类型检查、219项packages/边界测试、46项UI测试、125项server测试均通过；独立副本的生产build和只带编译产物/生产依赖的plain Node import通过。共390项测试，不包含独立研究探针，不代表浏览器和真实账户都完成。所有执行在隔离数据目录，未改真实用户数据；prod import只证明解析/导入，不是实际服务试听。
 
-Claude Code曾触发会话额度限制；2026-10-16 09:21（Pacific/Auckland）实际恢复，三个Opus任务与Fable独立审查均已继续运行，用户随后也明确要求继续使用。中断报告与成功结果分开保存，没有换模型冒充Opus。Fable已独立读完冻结`6c60bf5`，119次只读工具调用未越出快照；初审完成后才收到Codex的复现材料，现正复议预算、队列操作和字幕选择。原生播放与完整UI仍在实施，不把中间成功返回当终验。
+Claude Code曾触发会话额度限制；2026-10-16 09:21（Pacific/Auckland）实际恢复，三个Opus任务与Fable独立审查均已继续运行，用户随后也明确要求继续使用。中断报告与成功结果分开保存，没有换模型冒充Opus。Fable已独立读完冻结`6c60bf5`，119次只读工具调用未越出快照；初审完成后才收到Codex的复现材料，已完成独立初审与交叉复议。原生播放收口已提交，完整UI与新预算/字幕切片继续实施，不把中间成功返回当终验。
 
-**续作检查点：**服务端本轮131项检查与类型通过；独立冻结复核确认GC第201条可被清理、受保护版本保留，以及HEAD/GET中断/416/完整结束释放连接。已分别提交`a3fb788`和`7c81a5f`。真实DJ两轮请求链也通过；真实库未知source被旧mapper归一成main造成伪造local ref另被发现，Opus正在窄修复，因此DTO接线尚未宣布完成。`6c60bf5`的无源码生产产物另通过实际index启动、协议/空曲库/旧路由410/静态页面与SIGTERM退出；这不替代最终版本重验。
+**续作检查点：**服务端已完成上述GC、stream释放、真实DJ两轮出站请求链，以及真实库未知source不得归一成main的DTO修复；公开ref与实际catalog/resolve一致。播放事件修复`f2c839e`通过独立原生18项与恢复模型6项复核。工具链`bb59149`在独立空目录完成锁文件`npm ci`，无workspace dist时真实开发服务和Vite入口均可运行；CI配置已提交但尚未在GitHub执行。`6c60bf5`的无源码生产产物另通过实际index启动、协议/空曲库/旧路由410/静态页面与SIGTERM退出；这不替代最终版本重验。
 
-下一轮必须闭合：原生pause/playing/seek/ended归因和有界拒绝处理；完整UI三项已复现回归；server GC/HEAD资源释放；真实DJ prompt组装链；now owner有界升代；Folia异步ready与观察页seek标记；根cold-dev/CI和仓内可复跑应用浏览器验证。然后在同一版本跑完整播放/字幕/双页/恢复/故障链。真实账号、真实音箱/目标设备后台能力与R5日常使用继续单列，不能用合成WAV替代。
+**本轮Fable/Codex追加决策：**已有队列条目选择保留其itemId、origin、预热媒体与其它队列，仍取消旧cue；播放历史点击创建新occurrence，外部整张歌单仍原子替换。统一服务端阶段预算、客户端HTTP和runtime守卫，prepare长任务先返回active再poll，环境配置只能降低有界上限；合法慢任务不应被较短的外层deadline提前截断。DJ纯文本只有在已知媒体时长且有多句边界时，才在core只读snapshot投影为明确标注的estimated句级字幕；不可变资产不改、未知时长仍plain-text，不制造逐字时间。Fable撤回手动next必须再询问用户的判断，沿用已确认的直接切歌语义；其复议报告残留的aborted未修文字已由新代码和独立证据纠正，不再作为待办。
+
+**当前待闭合：**完整UI媒体键、pending radio取消、真实library迁移/喜欢、now owner有界升代、Folia异步ready与观察页seek；上述预算/字幕/队列点击决策及仓内应用browser工具。另已用受控写入边界中断模型复现旧队列先写complete后save的恢复缺口，Opus下一切片改为可恢复写入；不是实际用户数据故障或真实浏览器崩溃验收。完成后在稳定版本统一跑测试、构建、生产启动及受影响浏览器链。真实账号、真实音箱/目标设备后台能力与R5日常使用继续单列，不能用合成WAV替代。
 
 R1a已经区分队列条目、录音版本、load、cue和transition，采用纯`step → state + effects`；准备不计已听，队列在有效playing后消费，同条目receipt幂等。已修复非法ISO日期变成无限期、非安全整数版本、歌词/字幕时序矛盾、响应内脚本/语音身份矛盾，以及seek跨过窗口后的迟到事件补播。seek越过本曲转场窗口时本次直接接歌；seek回窗口之前，后续自然到达可以按新cue重评未播资产。已开始的口播不重播。
 
@@ -341,7 +343,7 @@ R1c复议明确：自然耗尽保留播放意图并显示exhausted，迟到补�
 
 完整UI接线追加裁决：歌单选择与后续条目一次替换；聊天的多字段建议先规范化，不能假设连续dispatch之间绝无媒体事实。用户已作新播放/队列决定后，迟到的破坏性聊天建议保留为文字或待显式采纳，不自动插队或开播。刷新恢复当前项在首的停止态队列，不恢复位置、历史、旧itemId或cue；恢复前不准备、不发声。上一首来自本次运行真实started历史，经新occurrence选择。电台补歌由owner应用服务负责单飞、有限重试与取消，候选仅准备一次；这明确更新了早期“ID只能由core调用工厂生成”的细节，未改变队列由core接受与管理。
 
-服务端复议采纳同origin执行器单调generation作为`/now`跨实例代际，seq只在同实例内比较，避免旧首条投影迟到取代新页；不宣称跨设备仲裁。stream的首次成功打开记录activation，未激活的过期handle拒绝；已激活的Range保留宽限，activation不算started，也不证明同一handle以后没有被重复装载。上述server行为已在`848d0a1`验证；UI当前owner在409后有界升代恢复仍待实现。真实DJ上下文已接started与from/to，生成去重明确不是“已听到”；实际最终模型请求组装链仍需隔离验证，不能只据formatter测试称已完成。
+服务端复议采纳同origin执行器单调generation作为`/now`跨实例代际，seq只在同实例内比较，避免旧首条投影迟到取代新页；不宣称跨设备仲裁。stream的首次成功打开记录activation，未激活的过期handle拒绝；已激活的Range保留宽限，activation不算started，也不证明同一handle以后没有被重复装载。上述server行为已在`848d0a1`验证；UI当前owner在409后有界升代恢复仍待实现。真实DJ上下文已接started与from/to，生成去重明确不是“已听到”；实际最终模型请求组装链已在`db4dfb8`经两轮隔离HTTP请求验证，不仅是formatter检查。
 
 播放事件复议：Fable已根据原生反例撤回“无论是否欠原生pause都立即合成ack”及“aborted只记note”的早期建议；双方均不接受把当前play ID贴到任意DOM playing上作归因，或用Promise resolve代替有效媒体事实。当前每effect确认数量/DOM pause ordinal方案与其更早boolean稿不同，需按实际实现验收；PlayRequestId只用于请求拒绝的身份，不声称DOM事件携带该ID。Codex保留一致的count合同，并要求driver覆盖外部已排队pause、失效ended与seek屏障；真正未请求的暂停不能靠core猜测成seek竞争而吞掉。未实际核对的浏览器内部实现与物理OS中断均不列为已证事实。
 
