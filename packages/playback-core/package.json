@@ -1,0 +1,24 @@
+{
+  "name": "@claudio/playback-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework-free playback domain core: commands/facts in, state + effects out. No DOM, Node, network or vendor dependencies.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@claudio/contracts": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsx --conditions=source --test test/*.test.ts"
+  }
+}

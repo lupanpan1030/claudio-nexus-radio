@@ -3,11 +3,15 @@
   "version": "0.1.2",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/contracts",
+    "packages/playback-core"
+  ],
   "scripts": {
     "dev": "concurrently -k -n server,web -c amber,cyan \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite",
-    "build": "tsc -b && vite build",
+    "build": "npm run check:boundaries && tsc -b && vite build",
     "start": "node dist-server/index.js",
     "preview": "vite preview",
     "scan": "tsx server/scripts/scan.ts",
@@ -16,7 +20,10 @@
     "dj:model-first-minimal-quality": "tsx server/scripts/dj-model-first-quality.ts --minimal",
     "dj:random-five": "tsx server/scripts/dj-random-five.ts",
     "dj:fewshot-selected-five": "tsx server/scripts/dj-fewshot-selected-five.ts",
-    "kugou:playback": "tsx server/scripts/kugou-playback-quality.ts"
+    "kugou:playback": "tsx server/scripts/kugou-playback-quality.ts",
+    "check:boundaries": "node scripts/check-package-boundaries.mjs",
+    "typecheck:packages": "tsc -b packages/playback-core && tsc -p packages/playback-core/tsconfig.test.json && tsc -p packages/contracts/tsconfig.test.json",
+    "test:packages": "tsx --conditions=source --test packages/contracts/test/*.test.ts packages/playback-core/test/*.test.ts scripts/check-package-boundaries.test.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",

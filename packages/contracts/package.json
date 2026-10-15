@@ -1,0 +1,21 @@
+{
+  "name": "@claudio/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Versioned, serializable playback/HTTP contracts and boundary decoders shared by Claudio web and server.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsx --conditions=source --test test/*.test.ts"
+  }
+}
