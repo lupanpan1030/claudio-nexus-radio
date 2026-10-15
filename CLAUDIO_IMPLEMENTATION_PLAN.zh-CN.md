@@ -354,7 +354,7 @@ Claude Code曾触发会话额度限制；2026-10-16 09:21（Pacific/Auckland）�
 
 证据位于本机`/tmp/claudio-implementation-20261016/`，临时目录不是永久发布物：`release-final-tests/test-results.json`、`release-final-build/build-results.json`、`release-final-artifact/artifact-results.json`、`release-final-production-start/result.json`、`release-final-app-browser/results/summary.json`、`release-final-source-match.json`。两个最终独立报告为`script-length-closure-independent-review.md`、`queue-resume-closure-independent-review.md`；浏览器修复前红证据在`e2e-native-voice-r1/prefix-run1/`，原失败没有覆盖。仓内可复跑入口与参数见README和`scripts/app-e2e/README.md`。
 
-**剩余验证边界：**未迁移或修改真实用户数据，未使用真实账号/外部付费TTS；测试voice为合成tone，主页面analyser读数不是扬声器输出。尚未证明真实KuGou/Fish延迟与歌词覆盖、目标设备长后台/锁屏/睡眠、同稿顺序与crossfade听感、R5七天窗口中至少三个真实使用日。前奏智能叠入及按窗口自动缩稿尚未启用，需可信录音窗口和试听证据后接线；不能以纯helper测试声称产品已有此能力。GitHub CI未运行，本轮只本地commit，未push/部署。
+**剩余验证边界：**未迁移或修改真实用户数据，未使用真实账号/外部付费TTS；测试voice为合成tone，主页面analyser读数不是扬声器输出。尚未证明真实KuGou/Fish延迟与歌词覆盖、目标设备长后台/锁屏/睡眠、同稿顺序与crossfade听感、R5七天窗口中至少三个真实使用日。前奏智能叠入及按窗口自动缩稿尚未启用，需可信录音窗口和试听证据后接线；不能以纯helper测试声称产品已有此能力。上述实施验收阶段GitHub CI未运行，只做本地commit，未push/部署；随后主机交接按第9.3节执行。
 
 R1a已经区分队列条目、录音版本、load、cue和transition，采用纯`step → state + effects`；准备不计已听，队列在有效playing后消费，同条目receipt幂等。已修复非法ISO日期变成无限期、非安全整数版本、歌词/字幕时序矛盾、响应内脚本/语音身份矛盾，以及seek跨过窗口后的迟到事件补播。seek越过本曲转场窗口时本次直接接歌；seek回窗口之前，后续自然到达可以按新cue重评未播资产。已开始的口播不重播。
 
@@ -386,6 +386,12 @@ R4入口裁决：复用Folia固定提交的**原生Lattice歌词canvas runtime**
 - 播放URL持久缓存按旧版本归档后废弃重建；TTS缓存按版本命名空间保留，核验后复用；KuGou会话、品味/记忆/档案JSON列入备份与格式清单。无需改的格式原样保留，需要改时加版本并写兼容读取/迁移，不能只备份SQLite。旧构建不识别的新文件不得覆盖旧格式。
 - 旧localStorage队列按版本一次导入，保留原始备份。新队列只由新核心写；刷新恢复idle并失效旧cue，不让旧应用和新应用同时读写同一可变结构。
 - 回退使用已保存旧构建与其兼容数据视图。加法迁移不保证旧版理解新历史；明确新记录的保留与不可展示范围，不因回退无声覆盖重构后新增数据。永久schema删除在替代完成与备份演练后另做。
+
+### 9.3 Windows 主机交接
+
+2026-10-16用户追加授权合并，并明确迁移目标为Windows主机、PowerShell。实施分支快进合入main，保留全部切片；主仓推送origin/main便于主机拉取，不触发仅手动执行的Showcase部署。精确交接提交由迁移包`TRANSFER_MANIFEST.json`记录，远端CI状态以对应提交Actions为准。
+
+[主机交接文档](HOST_HANDOFF.zh-CN.md)负责两仓恢复、Folia完整产物/pin校验、PowerShell安装启动、平台边界、真实数据单独迁移及回退；本方案仍是唯一产品/架构/实施真相源。迁移包同时保留两仓Git bundle、固定舞台源码及许可、最终验收和公开审查证据，不包含凭据、真实运行库或node_modules。原生Windows尚未验收，尤其POSIX备份权限与符号链接检查不可直接承诺兼容；跨系统本地音乐路径变化也不保证历史身份自动连续。
 
 ## 10. 如何知道改善了，而不是只多了代码
 
