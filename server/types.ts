@@ -1,4 +1,4 @@
-export type Track = {
+export type TrackRecord = {
   id: string;
   title: string;
   artist: string;
@@ -10,6 +10,20 @@ export type Track = {
   playable: boolean;
   size: number;
   addedAt: string;
+};
+
+// Transitional alias for the existing server-side code. New boundaries should
+// use TrackRecord so persistence-only fields are not confused with API DTOs.
+export type Track = TrackRecord;
+
+export type TrackDto = Pick<
+  TrackRecord,
+  "id" | "title" | "artist" | "album" | "extension" | "source" | "playable"
+>;
+
+export type LibraryResponse = {
+  tracks: TrackDto[];
+  total: number;
 };
 
 export type PlaybackSource = {

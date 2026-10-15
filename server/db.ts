@@ -183,6 +183,7 @@ function rowToTrack(row: Record<string, unknown>): Track {
 
 type GetTracksOptions = {
   playableOnly?: boolean;
+  searchFilePath?: boolean;
 };
 
 export function getTracks(limit = 500, query = "", options: GetTracksOptions = {}): Track[] {
@@ -192,8 +193,13 @@ export function getTracks(limit = 500, query = "", options: GetTracksOptions = {
 
   if (query.trim()) {
     const like = `%${query.trim()}%`;
-    where.push("(title LIKE ? OR artist LIKE ? OR album LIKE ? OR file_path LIKE ?)");
-    params.push(like, like, like, like);
+    if (options.searchFilePath === true) {
+      where.push("(title LIKE ? OR artist LIKE ? OR album LIKE ? OR file_path LIKE ?)");
+      params.push(like, like, like, like);
+    } else {
+      where.push("(title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+      params.push(like, like, like);
+    }
   }
 
   if (options.playableOnly) {

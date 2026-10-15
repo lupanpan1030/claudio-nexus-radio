@@ -1,32 +1,7 @@
-import crypto from "node:crypto";
-import { getKuGouPlaylistTracks, getKuGouUserPlaylists, scoreKuGouSongMatch, searchKuGouSong, type KuGouSong } from "./kugou.js";
+import { getKuGouPlaylistTracks, getKuGouUserPlaylists, scoreKuGouSongMatch, searchKuGouSong } from "./kugou.js";
 import { getKuGouLibraryStatus, replaceKuGouLibrary } from "./db.js";
+import { toKuGouApiTrack } from "./kugou-catalog.js";
 import type { Track } from "./types.js";
-
-function songKey(song: KuGouSong) {
-  return song.hash || song.sourceId || `${song.artist ?? ""}\n${song.title}`.toLowerCase();
-}
-
-function trackId(song: KuGouSong) {
-  return `kg-${crypto.createHash("sha1").update(songKey(song)).digest("hex").slice(0, 16)}`;
-}
-
-export function toKuGouApiTrack(song: KuGouSong): Track {
-  const id = trackId(song);
-  return {
-    id,
-    title: song.title,
-    artist: song.artist || "Unknown Artist",
-    album: song.album || "KuGou",
-    filePath: `kugou://${encodeURIComponent(songKey(song))}`,
-    folder: "KuGou API",
-    extension: "remote",
-    source: "kugou-api",
-    playable: true,
-    size: 0,
-    addedAt: new Date().toISOString()
-  };
-}
 
 export async function findExactKuGouApiTrack(input: Pick<Track, "artist" | "title">) {
   const songs = await searchKuGouSong(`${input.artist} ${input.title}`, 8);
@@ -56,3 +31,4 @@ export async function syncKuGouLibrary() {
 }
 
 export { getKuGouLibraryStatus };
+export { toKuGouApiTrack } from "./kugou-catalog.js";

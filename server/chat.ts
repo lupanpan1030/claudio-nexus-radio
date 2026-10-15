@@ -1,6 +1,7 @@
 import { setWeatherLocation } from "./config.js";
 import { resolveDirectTrack, directTrackPick } from "./direct.js";
 import { getRecentChat, recordChatMessage, upsertTracks } from "./db.js";
+import { kuGouCatalogSearchPort } from "./kugou-catalog.js";
 import { callLlmText } from "./llm.js";
 import { suggestPlaylist } from "./playlist.js";
 import { resolvePlaybackSource } from "./playback-source.js";
@@ -126,7 +127,7 @@ async function playableDirectPick(track: Track) {
   try {
     upsertTracks([track]);
     await resolvePlaybackSource(track.id);
-    return directTrackPick(track);
+    return directTrackPick(track, "KuGou API");
   } catch {
     return undefined;
   }
@@ -302,7 +303,7 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
     return reply;
   }
 
-  const direct = await resolveDirectTrack(clean);
+  const direct = await resolveDirectTrack(clean, kuGouCatalogSearchPort);
   if (direct.match) {
     clearDirectCandidates();
     const pick = await playableDirectPick(direct.match);
@@ -349,7 +350,7 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
 
   const modelIntent = needsModelIntentClassification(clean) ? await classifyChatIntent(clean) : undefined;
   if (modelIntent?.intent === "direct" || modelIntent?.intent === "queue") {
-    const modelDirect = await resolveDirectTrack(`播放 ${modelIntent.query}`);
+    const modelDirect = await resolveDirectTrack(`播放 ${modelIntent.query}`, kuGouCatalogSearchPort);
     if (modelDirect.match) {
       clearDirectCandidates();
       const pick = await playableDirectPick(modelDirect.match);

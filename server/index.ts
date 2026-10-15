@@ -40,6 +40,7 @@ import {
 import { nextRadioPick, nextRadioQueue, planToday } from "./radio.js";
 import { clearPlaybackSourceCache, resolvePlaybackSource, warmPlaybackSourceCache } from "./playback-source.js";
 import { getKuGouLibraryStatus, syncKuGouLibrary } from "./kugou-library.js";
+import { toLibraryResponse } from "./track-dto.js";
 import { getTtsFilePath, synthesizeTts } from "./tts.js";
 import { getUserProfileDocs, updateTasteProfile } from "./userProfile.js";
 import { getWeatherContext, sanitizeWeatherForDj, updateBrowserWeatherLocation } from "./weather.js";
@@ -239,7 +240,7 @@ app.post("/api/library/scan", async (_req, res) => {
 app.get("/api/library", (req, res) => {
   const query = String(req.query.q ?? "");
   const limit = Number(req.query.limit ?? 500);
-  res.json({ tracks: getTracks(limit, query), total: countTracks() });
+  res.json(toLibraryResponse(getTracks(limit, query, { searchFilePath: false }), countTracks()));
 });
 
 app.get("/api/track/:id/playback-source", async (req, res) => {

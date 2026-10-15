@@ -1,20 +1,16 @@
-import { upsertTracks } from "./db.js";
-import { toKuGouApiTrack } from "./kugou-library.js";
-import { searchKuGouSong, type KuGouSong } from "./kugou.js";
-import type { ClaudeDecision, RadioPick, Track } from "./types.js";
+import type { CatalogSearchPort } from "./catalog.js";
+import type { ClaudeDecision, RadioPick, TrackRecord } from "./types.js";
 
 type ScoredTrack = {
-  track: Track;
+  track: TrackRecord;
   score: number;
 };
-
-type KuGouSearch = (query: string, limit?: number) => Promise<KuGouSong[]>;
 
 export type DirectTrackResolution = {
   intent: boolean;
   query: string;
-  match?: Track;
-  candidates: Track[];
+  match?: TrackRecord;
+  candidates: TrackRecord[];
   reason: "matched" | "ambiguous" | "not-found" | "api-unavailable" | "no-intent";
 };
 
@@ -79,20 +75,19 @@ export function extractDirectSongQuery(message: string) {
   return "";
 }
 
-function scoreTrack(track: Track, query: string) {
+function scoreTrack(track: TrackRecord, query: string) {
   const normalizedQuery = normalizeSearchText(query);
   const title = normalizeSearchText(titleWithoutDescriptiveSuffix(track.title));
   const artist = normalizeSearchText(track.artist);
   const album = normalizeSearchText(track.album);
-  const filePath = normalizeSearchText(track.filePath);
   const artistTitle = normalizeSearchText(`${track.artist} ${track.title}`);
   const titleArtist = normalizeSearchText(`${track.title} ${track.artist}`);
-  const haystack = normalizeSearchText(`${track.title} ${track.artist} ${track.album} ${track.filePath}`);
+  const haystack = normalizeSearchText(`${track.title} ${track.artist} ${track.album}`);
   const compactQuery = compactSearchText(query);
   const compactTitle = compactSearchText(titleWithoutDescriptiveSuffix(track.title));
   const compactArtistTitle = compactSearchText(`${track.artist}${track.title}`);
   const compactTitleArtist = compactSearchText(`${track.title}${track.artist}`);
-  const compactHaystack = compactSearchText(`${track.title}${track.artist}${track.album}${track.filePath}`);
+  const compactHaystack = compactSearchText(`${track.title}${track.artist}${track.album}`);
   const tokens = normalizedQuery.split(" ").filter((token) => token.length >= 2);
 
   if (!normalizedQuery) return 0;
@@ -110,16 +105,15 @@ function scoreTrack(track: Track, query: string) {
   if (compactQuery.includes(compactTitle) && isSpecificContainedTitle(compactTitle)) return 72;
   if (artist === normalizedQuery) return 68;
   if (artist.includes(normalizedQuery) || album.includes(normalizedQuery)) return 58;
-  if (filePath.includes(normalizedQuery)) return 58;
   if (tokens.length > 0 && tokens.every((token) => haystack.includes(token))) return 62;
   if (compactQuery.length >= 2 && compactHaystack.includes(compactQuery)) return 62;
 
   return 0;
 }
 
-function rankApiMatches(query: string, songs: KuGouSong[]) {
+function rankCatalogMatches(query: string, tracks: readonly TrackRecord[]) {
   const seen = new Set<string>();
-  const tracks = songs.map(toKuGouApiTrack).filter((track) => {
+  const uniqueTracks = tracks.filter((track) => {
     if (track.artist.trim().toLowerCase() === "unknown artist") return false;
     const identity = `${compactSearchText(track.artist)}\n${compactSearchText(track.title)}`;
     if (seen.has(identity)) return false;
@@ -127,7 +121,7 @@ function rankApiMatches(query: string, songs: KuGouSong[]) {
     return true;
   });
 
-  return tracks
+  return uniqueTracks
     .map((track): ScoredTrack => ({ track, score: scoreTrack(track, query) }))
     .sort((left, right) => right.score - left.score);
 }
@@ -138,7 +132,7 @@ function isConfidentMatch(top: ScoredTrack, second?: ScoredTrack) {
   return Boolean(second && top.score >= 86 && top.score - second.score >= 10);
 }
 
-export async function resolveDirectTrack(message: string, search: KuGouSearch = searchKuGouSong): Promise<DirectTrackResolution> {
+export async function resolveDirectTrack(message: string, catalog: CatalogSearchPort): Promise<DirectTrackResolution> {
   if (!hasDirectPlaybackIntent(message)) {
     return { intent: directIntentPattern.test(message), query: "", candidates: [], reason: "no-intent" };
   }
@@ -148,14 +142,14 @@ export async function resolveDirectTrack(message: string, search: KuGouSearch = 
     return { intent: hasDirectPlaybackIntent(message), query: "", candidates: [], reason: "no-intent" };
   }
 
-  let songs: KuGouSong[];
+  let tracks: readonly TrackRecord[];
   try {
-    songs = await search(query, 8);
+    tracks = await catalog.search(query, 8);
   } catch {
     return { intent: true, query, candidates: [], reason: "api-unavailable" };
   }
 
-  const ranked = rankApiMatches(query, songs);
+  const ranked = rankCatalogMatches(query, tracks);
   const [top, second] = ranked;
   const candidates = ranked.slice(0, 5).map((item) => item.track);
   if (!top) return { intent: true, query, candidates: [], reason: "not-found" };
@@ -163,11 +157,11 @@ export async function resolveDirectTrack(message: string, search: KuGouSearch = 
   return { intent: true, query, match: top.track, candidates, reason: "matched" };
 }
 
-export function directTrackPick(track: Track): RadioPick {
+export function directTrackPick(track: TrackRecord, auditSource: string): RadioPick {
   const decision: ClaudeDecision = {
     say: `收到，接下来是 ${track.artist} 的《${track.title}》。`,
     play: [track.id],
-    reason: `KuGou API direct match: ${track.artist} - ${track.title}`,
+    reason: `${auditSource} direct match: ${track.artist} - ${track.title}`,
     segue: "direct"
   };
 

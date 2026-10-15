@@ -7,18 +7,17 @@ export type ClaudeDecision = {
   segue: ClaudeSegue;
 };
 
-export type Track = {
+export type TrackDto = {
   id: string;
   title: string;
   artist: string;
   album: string;
-  folder: string;
   extension: string;
   source: "main" | "kugou-cache" | "kugou-api";
   playable: boolean;
-  size: number;
-  addedAt: string;
 };
+
+export type Track = TrackDto;
 
 export type RadioPick = {
   songId: string;

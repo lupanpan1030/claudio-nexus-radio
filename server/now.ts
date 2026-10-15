@@ -1,4 +1,4 @@
-import type { RadioPick, Track } from "./types.js";
+import type { RadioPick, TrackDto } from "./types.js";
 
 export type NowPlayingDjSnapshot = {
   songId: string;
@@ -16,7 +16,7 @@ export type NowPlayingSnapshot = {
     duration: number;
     volume: number;
   };
-  currentTrack: Pick<Track, "id" | "title" | "artist" | "album" | "extension" | "source" | "playable"> | null;
+  currentTrack: TrackDto | null;
   currentPick: RadioPick | null;
   dj: NowPlayingDjSnapshot | null;
   queue: {
@@ -61,7 +61,7 @@ function trimString(value: unknown) {
 
 function normalizeTrack(value: unknown): NowPlayingSnapshot["currentTrack"] {
   if (!value || typeof value !== "object") return null;
-  const track = value as Partial<Track>;
+  const track = value as Partial<TrackDto>;
   const id = trimString(track.id);
   if (!id) return null;
 
@@ -71,7 +71,7 @@ function normalizeTrack(value: unknown): NowPlayingSnapshot["currentTrack"] {
     artist: trimString(track.artist),
     album: trimString(track.album),
     extension: trimString(track.extension),
-    source: track.source === "kugou-cache" ? "kugou-cache" : "main",
+    source: track.source === "kugou-api" ? "kugou-api" : track.source === "kugou-cache" ? "kugou-cache" : "main",
     playable: track.playable === true
   };
 }

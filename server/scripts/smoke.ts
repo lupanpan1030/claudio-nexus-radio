@@ -22,6 +22,7 @@ process.env.DJ_AI_TIMEOUT_MS = "12000";
 process.env.DJ_AI_REASONING_EFFORT = "low";
 
 const { resolveDirectTrack } = await import("../direct.js");
+const { toKuGouApiTrack } = await import("../kugou-catalog.js");
 const { resolvePlaybackSource } = await import("../playback-source.js");
 const { chatWithRadio, classifyEmotionalSignal, emotionalConversationGuidance } = await import("../chat.js");
 const { calculateRecencyBreakdown, getRadioDecision, nextSceneTags, timeSceneTags } = await import("../radio.js");
@@ -297,7 +298,7 @@ const checks: SmokeCheck[] = [
   {
     name: "calendar: local context exposes pacing without private schedule details",
     run: () => {
-      const workCalendar = getCalendarContext(new Date("2026-06-03T10:20:00+08:00"));
+      const workCalendar = getCalendarContext(new Date(2026, 5, 3, 10, 20));
       assert(workCalendar.block === "work", `expected work block, got ${workCalendar.block}`);
       assert(workCalendar.interruptionLevel === "quiet", `expected quiet mode, got ${workCalendar.interruptionLevel}`);
       const serialized = JSON.stringify(workCalendar);
@@ -310,7 +311,7 @@ const checks: SmokeCheck[] = [
       const context = await buildContext({
         mode: "dj-line",
         userMessage: "calendar context smoke",
-        calendar: getCalendarContext(new Date("2026-06-03T15:00:00+08:00")),
+        calendar: getCalendarContext(new Date(2026, 5, 3, 15, 0)),
         includeRecentChat: false,
         includeLongTermMemory: false,
         includeInterviewTail: false
@@ -490,9 +491,9 @@ const checks: SmokeCheck[] = [
       });
       createPersistentSmokeTrack({ title: "Sparkle", artist: "RADWIMPS", album: "Smoke Alias" });
       createPersistentSmokeTrack({ title: "You", artist: "M.Graveyard", album: "Smoke False Match" });
-      const result = await resolveDirectTrack("播放 July 的 My Soul", async () => [
-        { title: "My Soul", artist: "July", hash: "smoke-api-my-soul" }
-      ]);
+      const result = await resolveDirectTrack("播放 July 的 My Soul", {
+        search: async () => [toKuGouApiTrack({ title: "My Soul", artist: "July", hash: "smoke-api-my-soul" })]
+      });
       assert(result.reason === "matched", `expected matched, got ${result.reason}`);
       assert(result.match, "expected a direct match");
       assert(result.match.playable, "expected the direct match to be browser-playable");
