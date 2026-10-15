@@ -8,7 +8,8 @@
 //   node scripts/app-e2e/run.mjs [--scenario a,b,...] [--out dir]
 //
 // Scenarios: program, ownership, controls, features, stage, rapid-next,
-// source-failure, voice-failure, late-cue, new-source (default: all).
+// source-failure, voice-failure, late-cue, new-source, queue-select,
+// dj-plain, migration, refresh-during-talk (default: all).
 // A check passes only on observed facts: snapshot identity from the dev-only
 // read bridge, native media element state, analyser PCM windows, and the
 // fixture server's request log / started store. Exit 1 when any check fails.
@@ -19,7 +20,7 @@ import { parseArgs } from "node:util";
 import { startFixture } from "./fixture.mjs";
 import { delay, launchBrowser, openPage, progressing, readObservation } from "./browser.mjs";
 
-const ALL = ["program", "ownership", "controls", "features", "stage", "rapid-next", "source-failure", "voice-failure", "late-cue", "new-source"];
+const ALL = ["program", "ownership", "controls", "features", "stage", "rapid-next", "source-failure", "voice-failure", "late-cue", "new-source", "queue-select", "dj-plain", "migration", "refresh-during-talk"];
 const { values: args } = parseArgs({ options: { scenario: { type: "string" }, out: { type: "string" } } });
 const selected = args.scenario ? args.scenario.split(",") : ALL;
 for (const name of selected) if (!ALL.includes(name)) throw new Error(`unknown scenario ${name}`);
@@ -77,7 +78,49 @@ const clickLabel = async (tab, label) => {
   await tab.page.waitForSelector(selector, { visible: true, timeout: 5000 });
   await tab.page.click(selector);
 };
-const caption = (tab) => tab.page.evaluate(() => document.querySelector(".program-subtitle")?.textContent ?? null);
+/** Caption text without the estimate badge (lyrics captions have no inner text span). */
+const caption = (tab) => tab.page.evaluate(() => {
+  const element = document.querySelector(".program-subtitle");
+  return element ? (element.querySelector(".caption-text") ?? element).textContent : null;
+});
+/**
+ * One synchronous read of the DJ caption and both clocks: its sentence, badge
+ * and timing class, the snapshot's subtitle track, and the voice and program
+ * music positions from the same clock reading.
+ */
+const djCaption = (tab) => tab.page.evaluate(() => {
+  const element = document.querySelector(".program-subtitle");
+  const bridge = window.__claudioPlayback;
+  const snapshot = bridge.view().snapshot;
+  const reading = bridge.clock();
+  const deck = snapshot?.program?.deck ? reading.decks[snapshot.program.deck] : null;
+  return {
+    text: element ? (element.querySelector(".caption-text") ?? element).textContent : null,
+    badge: element?.querySelector(".caption-badge")?.textContent ?? null,
+    timing: element?.getAttribute("data-timing") ?? null,
+    whole: element?.classList.contains("is-whole") ?? false,
+    title: element?.getAttribute("title") ?? null,
+    voiceStatus: snapshot?.voice?.status ?? null,
+    script: snapshot?.voice?.scriptText ?? null,
+    subtitle: snapshot?.voice?.subtitle ?? null,
+    voiceMs: reading.voice?.positionMs ?? null,
+    musicMs: deck?.positionMs ?? null
+  };
+});
+/** Index of the estimated/native segment at `ms`, as the UI computes it. */
+const segmentAt = (subtitle, ms) => {
+  let active = -1;
+  (subtitle?.segments ?? []).forEach((segment, index) => {
+    if (segment.startMs !== undefined && segment.startMs <= ms) active = index;
+  });
+  return active;
+};
+/** Voice-branch labels of the open panel: LyricsPanel header and the transcript line labels. */
+const panelLabels = (tab) => tab.page.evaluate(() => ({
+  lyricsHead: document.querySelector(".lyrics-panel-head small")?.textContent ?? null,
+  transcript: [...document.querySelectorAll(".voice-transcript p small")].map((small) => small.textContent),
+  transcriptTiming: document.querySelector(".voice-transcript")?.getAttribute("data-timing") ?? null
+}));
 const nativeMedia = async (tab) => (await readObservation(tab.page))?.media ?? [];
 async function chat(tab, text) {
   await tab.page.bringToFront();
@@ -98,6 +141,137 @@ async function seekSlider(tab, seconds) {
 async function musicElement(tab) {
   const media = await nativeMedia(tab);
   return media.filter((element) => element.src.includes(STREAM) && !element.paused).sort((a, b) => b.currentTime - a.currentTime)[0] ?? null;
+}
+
+/** One synchronous page read: the full snapshot, the runtime's info log and every native media element at that instant. */
+const moment = (tab) => tab.page.evaluate(() => {
+  const bridge = window.__claudioPlayback;
+  return { at: Date.now(), snapshot: bridge?.view().snapshot ?? null, log: bridge?.log() ?? [], media: window.__uiE2eObserver.read().media };
+});
+/** True when a media element's src is the stream handle (handles are same-origin paths). */
+const sameStream = (src, handle) => {
+  try {
+    const a = new URL(src);
+    const b = new URL(handle, a.origin);
+    return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search;
+  } catch {
+    return false;
+  }
+};
+/**
+ * Which stream handle the server issued for what, from the recorded HTTP answers:
+ * music handles per item (prepare stages / preparation polls / resolve) and voice
+ * handles per cue with the A→B pair and source revisions the cue was requested for
+ * (POST narration, or narration carried by B's prepare).
+ */
+function streamBindings(requests) {
+  const preparations = new Map();
+  for (const row of requests) if (row.method === "POST" && row.path === "/api/v1/playback/prepare" && row.response?.preparationId) preparations.set(row.response.preparationId, row.body);
+  const music = [];
+  const voice = [];
+  const voiceFrom = (row, via, cueId, from, to, stage, script) => {
+    if (stage?.status !== "ready") return;
+    voice.push({ seq: row.seq, via, cueId, fromItemId: from.itemId, fromRevision: from.revision, toItemId: to.itemId, toRevision: to.revision, handle: stage.value.stream.handle, voiceAssetId: stage.value.assetId, scriptAssetId: stage.value.scriptAssetId, script: script?.status === "ready" ? { assetId: script.value.assetId, text: script.value.text } : null });
+  };
+  for (const row of requests) {
+    const answer = row.response;
+    if (!answer || (row.status ?? 200) >= 400) continue;
+    if (answer.stages && answer.itemId) {
+      const source = answer.stages.source?.status === "ready" ? answer.stages.source.value : null;
+      if (source) music.push({ seq: row.seq, itemId: answer.itemId, handle: source.stream.handle, mediaId: source.track.mediaId, sourceRevision: source.sourceRevision, recordingId: source.recording?.recordingId ?? null });
+      const request = preparations.get(answer.preparationId);
+      if (request?.narration) voiceFrom(row, "prepare", request.narration.cueId, { itemId: request.narration.fromItemId, revision: request.narration.fromRevision }, { itemId: answer.itemId, revision: source?.sourceRevision ?? null }, answer.stages.voice, answer.stages.script);
+    } else if (row.path === "/api/v1/playback/resolve" && answer.media) {
+      music.push({ seq: row.seq, itemId: answer.itemId, handle: answer.media.stream.handle, mediaId: answer.media.track.mediaId, sourceRevision: answer.media.sourceRevision, recordingId: answer.media.recording?.recordingId ?? null });
+    } else if (row.path === "/api/v1/playback/narration" && row.body?.from) {
+      voiceFrom(row, "narration", answer.cueId, { itemId: row.body.from.itemId, revision: row.body.from.sourceRevision }, { itemId: row.body.to.itemId, revision: row.body.to.sourceRevision }, answer.voice, answer.script);
+    }
+  }
+  return { music, voice };
+}
+
+/**
+ * Strict sequential A→DJ→B at one instant, from two `moment` reads ~0.6 s apart.
+ * The cue in the snapshot is tied to a real element: the voice handle the server
+ * issued for exactly this (A item, rev) → (B item, rev) pair is the src of the one
+ * element that plays and advances; that asset's script is the cue's script. The
+ * cue is either the one that was requested, or (logged by the core) a new cue
+ * that reused an unspoken asset of the same pair, which needs no new request.
+ * At the same reads A's own element has ended and B's elements are silent, and B
+ * has neither a receipt nor a started fact. The script must name B's catalog
+ * title and be the writer's text for a request from A to B.
+ */
+async function sequentialTalk(s, tab, aItemId, bItemId) {
+  const m1 = await moment(tab);
+  const server1 = await s.state();
+  await delay(600);
+  const m2 = await moment(tab);
+  const log = await s.fixture.api("GET", "/__fixture/log?afterSeq=0");
+  const bindings = streamBindings(log.requests);
+  const snap = m1.snapshot;
+  const voice = snap?.voice ?? null;
+  const transition = snap?.transition ?? null;
+  const program = snap?.program ?? null;
+  const programDeck = program?.deck ? snap.decks[program.deck] : null;
+  const handlesOf = (itemId) => bindings.music.filter((entry) => entry.itemId === itemId);
+  const elementsOf = (media, entries) => media.filter((element) => entries.some((entry) => sameStream(element.src, entry.handle)));
+  // A request revision is null when that item was not resolved yet at request time (B usually is not); a known one must match.
+  const sameRevision = (requested, planned) => requested === null || requested === planned;
+  const pairAssets = bindings.voice.filter((entry) => entry.fromItemId === aItemId && entry.toItemId === bItemId && transition && sameRevision(entry.fromRevision, transition.fromRevision) && sameRevision(entry.toRevision, transition.toRevision));
+  const allMusic = bindings.music;
+  const unpaused1 = m1.media.filter((element) => !element.paused);
+  const unpaused2 = m2.media.filter((element) => !element.paused);
+  const voiceElement1 = unpaused1.length === 1 && elementsOf(unpaused1, pairAssets).length === 1 ? unpaused1[0] : null;
+  const voiceElement2 = voiceElement1 ? m2.media.find((element) => element.id === voiceElement1.id) : null;
+  const asset = voiceElement1 ? pairAssets.find((entry) => sameStream(voiceElement1.src, entry.handle)) : null;
+  const reuseNote = m1.log.some((entry) => entry.event === "note" && /reused unspoken narration asset/.test(entry.data?.reason ?? ""));
+  const cueBinding = asset && voice ? (asset.cueId === voice.cueId ? "requested" : reuseNote ? "reused" : null) : null;
+  const aMusic = handlesOf(aItemId);
+  const bMusic = handlesOf(bItemId);
+  const aElements = [m1, m2].map((m) => elementsOf(m.media, aMusic));
+  const bElements = [m1, m2].map((m) => elementsOf(m.media, bMusic));
+  const bTitle = server1.tracks.find((track) => track.mediaId === "B")?.title ?? null;
+  const writer = log.events.filter((event) => event.type === "script-start" && event.from?.mediaId === "A" && event.to?.mediaId === "B").map((event) => event.call);
+  const written = log.events.filter((event) => event.type === "script-ready" && writer.includes(event.call)).map((event) => event.text);
+  const bStartedPosts = log.requests.filter((row) => row.method === "POST" && row.path === "/api/v1/playback/started" && row.body?.itemId === bItemId && row.seq <= server1.requestCount);
+  const facts = {
+    voiceCue:
+      voice?.origin === "transition" && voice.status === "speaking" && transition?.fromItemId === aItemId && transition.toItemId === bItemId && transition.cueId === voice.cueId && transition.phase === "talking" && snap.display?.kind === "voice" && snap.display.cueId === voice.cueId,
+    voiceElement:
+      voiceElement1 !== null && voiceElement2 !== undefined && voiceElement2 !== null && !voiceElement2.paused && voiceElement2.src === voiceElement1.src && voiceElement2.currentTime - voiceElement1.currentTime >= 0.3 && unpaused2.length === 1 && unpaused2[0].id === voiceElement1.id && !allMusic.some((entry) => sameStream(voiceElement1.src, entry.handle)),
+    assetIsCue: asset !== null && asset !== undefined && cueBinding !== null && asset.script?.assetId === asset.scriptAssetId && asset.script?.text === voice.scriptText,
+    // The binding's revisions are the ones A's deck plays (with its recording) and the one B was resolved to.
+    identity:
+      transition !== null && programDeck !== null && transition.fromRevision !== null && transition.toRevision !== null && transition.fromRevision === programDeck.sourceRevision &&
+      aMusic.some((entry) => entry.mediaId === "A" && entry.sourceRevision === transition.fromRevision && entry.recordingId === programDeck.recordingId) &&
+      bMusic.some((entry) => entry.mediaId === "B" && entry.sourceRevision === transition.toRevision && entry.recordingId !== null),
+    aEnded:
+      program?.item.itemId === aItemId && program.started && programDeck?.status === "ended" && programDeck.itemId === aItemId && aElements.every((list) => list.length >= 1 && list.every((element) => element.paused)) && aElements[0].some((element) => element.ended),
+    bSilent:
+      program?.item.itemId !== bItemId && snap.queue.some((entry) => entry.item.itemId === bItemId) && !snap.receipts.some((receipt) => receipt.itemId === bItemId) && startedFor(server1, bItemId).length === 0 && bStartedPosts.length === 0 && bElements.every((list) => list.every((element) => element.paused)) && bElements[1].every((element) => Math.abs(element.currentTime - (bElements[0].find((x) => x.id === element.id)?.currentTime ?? element.currentTime)) < 0.01),
+    namesB: bTitle !== null && (voice?.scriptText ?? "").includes(bTitle) && written.includes(voice?.scriptText ?? "\u0000")
+  };
+  const evidence = {
+    facts,
+    cue: voice && { cueId: voice.cueId, status: voice.status, voiceLoadId: voice.voiceLoadId, script: voice.scriptText },
+    transition,
+    program: program && { itemId: program.item.itemId, mediaId: program.item.track.mediaId, started: program.started, deck: programDeck && { status: programDeck.status, itemId: programDeck.itemId, sourceRevision: programDeck.sourceRevision, recordingId: programDeck.recordingId } },
+    cueBinding,
+    reuseNote,
+    asset,
+    pairAssets,
+    voiceElement: [voiceElement1, voiceElement2],
+    aElements,
+    bElements,
+    aMusic,
+    bMusic,
+    unpaused: [unpaused1, unpaused2],
+    bTitle,
+    writerCalls: writer,
+    receipts: snap?.receipts ?? null,
+    serverStarted: server1.started.map((fact) => `${fact.track.mediaId}:${fact.itemId}`)
+  };
+  return { ok: Object.values(facts).every(Boolean), facts, evidence, snapshot: snap };
 }
 
 class Scenario {
@@ -258,25 +432,54 @@ const scenarios = {
     await s.phase("a-dj-b");
     await seekSlider(tab, 7);
     const dj = await waitFor(() => view(tab), (v) => v.voice?.origin === "transition" && v.voice.status === "speaking" && v.transition?.from === a.program.itemId && v.transition.to === b.itemId && v.transition.cueId === v.voice.cueId && v.display?.kind === "voice" && v.display.cueId === v.voice.cueId, 25000, 80);
-    let voiceProgress = [];
-    let djCaption = null;
+    let talk = null;
+    const captions = [];
+    let panel = null;
     if (dj.ok) {
-      const o1 = await readObservation(tab.page);
-      await delay(600);
-      const o2 = await readObservation(tab.page);
-      voiceProgress = progressing(o1, o2).filter((element) => element.src.includes(STREAM));
-      djCaption = await caption(tab);
+      talk = await sequentialTalk(s, tab, a.program.itemId, b.itemId);
+      // Sentences across the voice, each read with the clock reading it was drawn from.
+      for (let index = 0; index < 8; index += 1) {
+        const read = await djCaption(tab);
+        if (read.voiceStatus !== "speaking") break;
+        captions.push(read);
+        await delay(350);
+      }
       await tab.capture("02-dj-speaking");
+      await clickLabel(tab, "打开 Claudio 口播与歌词面板");
+      await tab.page.waitForSelector('[role="dialog"]', { timeout: 5000 });
+      panel = { ...(await panelLabels(tab)), voiceStatus: (await view(tab)).voice?.status ?? null };
+      await tab.capture("02b-dj-panel");
+      await clickLabel(tab, "关闭面板");
     }
     // The spoken cue may reuse an asset requested under an earlier cue id of the same A→B pair
-    // (a seek re-plans the transition and keeps an unspoken asset), so match the pair, not the id.
-    const narration = (await s.requests()).filter((row) => row.method === "POST" && row.path === "/api/v1/playback/narration" && row.body?.from?.itemId === a.program.itemId && row.body?.to?.itemId === b.itemId);
+    // (a seek re-plans the transition and keeps an unspoken asset), so the asset is matched by the pair.
+    const f = talk?.facts ?? {};
+    s.check("A→DJ: the snapshot's transition cue for exactly A's item → the chat-queued B item is speaking, bound to A's deck revision/recording and B's resolved revision", dj.ok && b.origin === "chat" && f.voiceCue && f.identity, talk?.evidence ?? dj.last);
+    s.check("native voice: the one playing, advancing element has the voice handle the server issued for that A→B pair, and that asset's script is the cue's (requested cue, or a core-logged reuse of the pair's unspoken asset)", dj.ok && f.voiceElement && f.assetIsCue, talk?.evidence ?? null);
+    s.check("same reads: A's own element has ended and its deck is ended; B's elements are silent and B has no receipt, no started request and no started fact", dj.ok && f.aEnded && f.bSilent, talk?.evidence ?? null);
+    s.check("the spoken script names B by its fixture catalog title and is the writer's text for an A→B request", dj.ok && f.namesB, talk && { bTitle: talk.evidence.bTitle, script: talk.evidence.cue?.script, writerCalls: talk.evidence.writerCalls });
+    const sentences = captions.map((read) => {
+      const index = segmentAt(read.subtitle, read.voiceMs);
+      // The caption re-renders every 150 ms: next to a boundary the neighbouring sentence is also right.
+      // That is the sentence starting there and the one ending there.
+      const segments = read.subtitle?.segments ?? [];
+      const near = segments.filter((segment, i) => Math.abs(segment.startMs - read.voiceMs) < 250 || (segments[i + 1] !== undefined && Math.abs(segments[i + 1].startMs - read.voiceMs) < 250)).map((segment) => segment.text);
+      return { text: read.text, expected: read.subtitle?.segments[index]?.text ?? null, near, voiceMs: read.voiceMs, musicMs: read.musicMs, badge: read.badge, timing: read.timing, whole: read.whole };
+    });
     s.check(
-      "A→DJ: the transition voice for exactly A→(chat B) is speaking in the snapshot, its native element advances, its script was requested for that pair and names B",
-      dj.ok && voiceProgress.length >= 1 && narration.length > 0 && narration.every((row) => row.body.from.track.mediaId === "A" && row.body.to.track.mediaId === "B") && (dj.last.voice.script ?? "").includes("下一段风景"),
-      { voice: dj.last?.voice, transition: dj.last?.transition, voiceProgress, narrationBodies: narration.map((row) => ({ cueId: row.body.cueId, from: row.body.from, to: row.body.to })) }
+      "DJ caption: the core's estimated sentence at the voice clock, with a visible 估算 badge separate from the sentence text",
+      captions.length >= 3 &&
+        captions.every((read) => read.subtitle?.timing === "estimated" && read.timing === "estimated" && read.badge === "估算" && !read.whole) &&
+        sentences.every((entry) => entry.text === entry.expected || entry.near.includes(entry.text)) &&
+        new Set(sentences.map((entry) => entry.text)).size >= 2 &&
+        sentences.every((entry) => (dj.last?.display?.text ?? "").includes(entry.text)),
+      { sentences, segments: captions[0]?.subtitle?.segments }
     );
-    s.check("DJ caption shows the DJ sentence while the voice is the program output", typeof djCaption === "string" && (dj.last?.display?.text ?? "").includes(djCaption), { djCaption, text: dj.last?.display?.text });
+    s.check(
+      "open panel during the DJ: LyricsPanel says 时间为估算 and the transcript lines are labelled as estimates",
+      panel !== null && panel.voiceStatus === "speaking" && panel.lyricsHead === "Claudio 正在串场 · 时间为估算" && panel.transcriptTiming === "estimated" && panel.transcript.length >= 2 && panel.transcript.every((label) => label === "Claudio · 时间为估算"),
+      panel
+    );
     const bPlaying = await waitFor(() => view(tab), (v) => v.program?.itemId === b.itemId && v.program.mediaId === "B" && v.program.started && v.transport === "playing", 30000);
     const state1 = await serverState(s, b.itemId);
     const order = state1.started.map((fact) => `${fact.track.mediaId}:${fact.itemId}`);
@@ -435,7 +638,7 @@ const scenarios = {
 
 
     // Main button on a fresh profile (empty queue): while the slow chooser runs the button reads
-    // "暂停"; pressing it withdraws the start the same way.
+    // "取消开播" (nothing plays yet, so not "暂停"); pressing it withdraws the start the same way.
     await s.phase("main-button-cancel");
     a.dump();
     await tab.page.close();
@@ -446,12 +649,19 @@ const scenarios = {
     const startedBefore = (await s.state()).started.length;
     await clickLabel(fresh, "播放");
     const choosing = await waitFor(() => s.state(), (state) => state.counters.radio > radioBefore, 5000);
-    const label = await fresh.page.$eval(".icon-button.primary", (button) => button.getAttribute("aria-label"));
-    await clickLabel(fresh, "暂停");
+    const mainButton = () => fresh.page.$eval(".icon-button.primary", (button) => ({ label: button.getAttribute("aria-label"), title: button.getAttribute("title"), intent: button.getAttribute("data-intent"), spinner: button.querySelector(".spin") !== null }));
+    const statusText = () => fresh.page.evaluate(() => document.body.innerText);
+    const pending = await mainButton();
+    const pendingNotice = (await statusText()).includes("再按播放键可取消开播");
+    await fresh.capture("00-main-button-pending");
+    await clickLabel(fresh, "取消开播");
+    const afterCancel = await mainButton();
+    const cancelledNotice = await waitFor(statusText, (text) => text.includes("已取消开播"), 3000);
     const quietMain = await silentArrival(s, fresh);
     const silent = quietMain.after;
     await fresh.capture("01-main-button-cancelled");
-    s.check("main button: reads 暂停 while the start will play; pressing it keeps the late candidate silent", choosing.ok && label === "暂停" && quietMain.arrived && silent.transport === "idle" && silent.queue.length === 1 && quietMain.sounding.length === 0 && quietMain.pcm === 0 && quietMain.started === startedBefore, { label, ...quietMain });
+    s.check("main button: reads 取消开播 (spinner, not 暂停) while the start will play, and the notice says the same", choosing.ok && pending.label === "取消开播" && pending.intent === "cancel-start" && pending.spinner && pendingNotice, { pending, pendingNotice });
+    s.check("pressing it: back to 播放, notice 已取消开播, the late candidate stays silent", afterCancel.label === "播放" && cancelledNotice.ok && quietMain.arrived && silent.transport === "idle" && silent.queue.length === 1 && quietMain.sounding.length === 0 && quietMain.pcm === 0 && quietMain.started === startedBefore, { afterCancel, ...quietMain });
     await clickLabel(fresh, "播放");
     const replayed = await waitFor(() => view(fresh), (v) => v.transport === "playing" && v.program?.started, 15000);
     s.check("pressing 播放 afterwards plays the silently queued candidate", replayed.ok && replayed.last.program.itemId === silent.queue[0]?.itemId, replayed.last?.program);
@@ -690,6 +900,284 @@ const scenarios = {
     const state = await serverState(s, again.itemId);
     const facts = state.started.filter((fact) => fact.track.mediaId === "A");
     s.check("new bytes → new source revision for the new occurrence; lyrics and started bind to it, the first keeps its own", second.ok && second.last.program.revision !== first.program.revision && second.last.display.lyricsRevision === second.last.program.revision && facts.length === 2 && facts.some((fact) => fact.sourceRevision === first.program.revision) && facts.some((fact) => fact.sourceRevision === second.last.program.revision), { first: first.program.revision, second: second.last?.program?.revision, lyrics: second.last?.display?.lyricsRevision, facts: facts.map((fact) => fact.sourceRevision) });
+  },
+
+  /** Clicking existing queue rows selects that very occurrence: preheated media reused, nothing else dropped. */
+  async "queue-select"(s) {
+    await s.start();
+    const tab = await s.tab("tab-A");
+    await s.executor(tab);
+    await chat(tab, "歌单");
+    const loaded = await waitFor(() => view(tab), (v) => v.transport === "idle" && v.queue.map((entry) => entry.mediaId).join(",") === "A,B,C", 15000);
+    if (!loaded.ok) throw new Error(`playlist not loaded: ${JSON.stringify(loaded.last)}`);
+    const [a, b, c] = loaded.last.queue;
+    const row = async (title) => {
+      await tab.page.bringToFront();
+      const handle = await tab.page.evaluateHandle((wanted) => [...document.querySelectorAll(".playlist-track")].find((button) => button.querySelector("strong")?.textContent === wanted) ?? null, title);
+      const element = handle.asElement();
+      if (!element) throw new Error(`no queue row ${title}`);
+      return element;
+    };
+    const prepares = async (itemId) => (await s.requests()).filter((entry) => entry.method === "POST" && /^\/api\/v1\/playback\/(prepare|resolve)$/.test(entry.path) && entry.body?.itemId === itemId).map((entry) => entry.path);
+    const decks = () => tab.page.evaluate(() => Object.values(window.__claudioPlayback.view().snapshot.decks).map((deck) => ({ deck: deck.deck, role: deck.role, status: deck.status, itemId: deck.itemId, loadId: deck.loadId })));
+
+    // Idle restored head: clicking it plays that item (no replace).
+    await (await row("灯亮之前")).click();
+    const aPlaying = await waitFor(() => view(tab), (v) => v.transport === "playing" && v.program?.started, 15000);
+    s.check("idle head row: plays that same occurrence (itemId and origin kept), B and C stay queued", aPlaying.ok && aPlaying.last.program.itemId === a.itemId && aPlaying.last.queue.slice(0, 2).map((entry) => entry.itemId).join(",") === `${b.itemId},${c.itemId}`, { program: aPlaying.last?.program, queue: aPlaying.last?.queue });
+
+    // Wait until B is preheated on the standby deck, then click B's row.
+    const preheated = await waitFor(decks, (list) => list.some((deck) => deck.itemId === b.itemId && deck.loadId && deck.status !== "idle" && deck.status !== "loading"), 15000);
+    const bDeck = preheated.last?.find((deck) => deck.itemId === b.itemId) ?? null;
+    const preparesBefore = await prepares(b.itemId);
+    const mediaBefore = (await nativeMedia(tab)).filter((element) => element.src.includes(STREAM)).map((element) => `${element.id}|${element.src}`);
+    await s.phase("select-b");
+    await (await row("下一段风景")).click();
+    const bPlaying = await waitFor(() => view(tab), (v) => v.program?.itemId === b.itemId && v.program.started && v.transport === "playing", 15000);
+    await delay(800);
+    const after = await view(tab);
+    const preparesAfter = await prepares(b.itemId);
+    const playingNow = (await nativeMedia(tab)).filter((element) => element.src.includes(STREAM) && !element.paused).map((element) => `${element.id}|${element.src}`);
+    s.check(
+      "B row: the preheated B is promoted as is — same itemId/origin, same loadId (no new load), still exactly one prepare and no resolve",
+      preheated.ok && bPlaying.ok && after.program.loadId === bDeck.loadId && after.program.deck === bDeck.deck && preparesBefore.length === 1 && preparesAfter.length === 1 && preparesAfter[0] === "/api/v1/playback/prepare",
+      { bDeck, program: after.program, preparesBefore, preparesAfter }
+    );
+    s.check("the playing element is the one B was preheated in (same element and src, no new media load)", playingNow.length === 1 && mediaBefore.includes(playingNow[0]), { mediaBefore, playingNow });
+    const programOrigin = await tab.page.evaluate(() => window.__claudioPlayback.view().snapshot.program.item.origin);
+    s.check(
+      "nothing else dropped: C still queued under its itemId, A recorded as skipped, B keeps its origin",
+      after.queue.some((entry) => entry.itemId === c.itemId) && after.history.some((entry) => entry.itemId === a.itemId && entry.outcome === "skipped") && after.queue.every((entry) => entry.itemId !== b.itemId) && b.origin === programOrigin,
+      { queue: after.queue, history: after.history, origin: [b.origin, programOrigin] }
+    );
+    const state = await serverState(s, b.itemId);
+    s.check("started is recorded under B's kept itemId exactly once", startedFor(state, b.itemId).length === 1, state.started.map((fact) => fact.itemId));
+    await tab.capture("01-b-selected");
+
+    // A played row replays as a new occurrence (history is never re-entered).
+    await s.phase("replay-history");
+    await (await row("灯亮之前")).click();
+    const replayed = await waitFor(() => view(tab), (v) => v.program?.mediaId === "A" && v.program.itemId !== a.itemId && v.program.started, 15000);
+    s.check("a played row replays as a new occurrence; C is still queued", replayed.ok && replayed.last.queue.some((entry) => entry.itemId === c.itemId), { program: replayed.last?.program, queue: replayed.last?.queue });
+  },
+
+  /** Voice duration the server cannot measure: no estimated timing; the caption shows the whole script, unlabelled as timed. */
+  async "dj-plain"(s) {
+    await s.start({ config: { voiceFormat: "ogg-labelled-wav", voiceDurationMs: 4000 } });
+    const tab = await s.tab("tab-A");
+    await s.executor(tab);
+    const a = await playViaChat(s, tab, "A");
+    const b = await queueViaChat(tab, "B");
+    await seekSlider(tab, 7);
+    const dj = await waitFor(() => view(tab), (v) => v.voice?.origin === "transition" && v.voice.status === "speaking" && v.transition?.from === a.program.itemId && v.transition.to === b.itemId && v.display?.kind === "voice", 25000, 80);
+    const reads = [];
+    let talk = null;
+    let panel = null;
+    if (dj.ok) {
+      talk = await sequentialTalk(s, tab, a.program.itemId, b.itemId);
+      for (let index = 0; index < 4; index += 1) {
+        const read = await djCaption(tab);
+        if (read.voiceStatus !== "speaking") break;
+        reads.push(read);
+        await delay(300);
+      }
+      await tab.capture("01-dj-plain-caption");
+      await clickLabel(tab, "打开 Claudio 口播与歌词面板");
+      await tab.page.waitForSelector('[role="dialog"]', { timeout: 5000 });
+      panel = { ...(await panelLabels(tab)), voiceStatus: (await view(tab)).voice?.status ?? null };
+      await tab.capture("02-dj-plain-panel");
+      await clickLabel(tab, "关闭面板");
+    }
+    if (!dj.ok) s.notes.push({ last: dj.last, log: await tab.page.evaluate(() => window.__claudioPlayback.log().slice(-40)) });
+    const f = talk?.facts ?? {};
+    const asset = talk?.evidence.asset ?? null;
+    const voiceRequests = asset ? (await s.requests()).filter((row) => row.method === "GET" && row.path === new URL(asset.handle, "http://x").pathname) : [];
+    s.check(
+      "unknown voice duration: the strict A→B cue still plays from the native element holding its voice handle (fetched from the server under that handle), and the core keeps plain text",
+      dj.ok && f.voiceCue && f.identity && f.voiceElement && f.assetIsCue && voiceRequests.length >= 1 && reads.length >= 2 && reads.every((read) => read.subtitle?.timing === "plain-text"),
+      { ...(talk?.evidence ?? {}), voiceStreamRequests: voiceRequests.map((row) => ({ seq: row.seq, status: row.status, range: row.range })), timing: reads.map((read) => read.subtitle?.timing) }
+    );
+    s.check("same reads: A's element has ended, B silent with no receipt/started; the script names B by its catalog title and is the writer's A→B text", dj.ok && f.aEnded && f.bSilent && f.namesB, talk && { facts: f, aElements: talk.evidence.aElements, bElements: talk.evidence.bElements, bTitle: talk.evidence.bTitle, script: talk.evidence.cue?.script });
+    s.check(
+      "the caption shows the whole script on one truncated line (full text in its title), with no estimate badge, never just the first sentence",
+      reads.length >= 2 && reads.every((read) => read.whole && read.text === read.script.trim() && read.title === read.script.trim() && read.badge === null && read.timing === "plain-text"),
+      reads.map(({ text, title, whole, badge, timing }) => ({ text, title, whole, badge, timing }))
+    );
+    s.check("panel during the plain DJ: LyricsPanel says 全文, transcript lines say Claudio · 全文", panel !== null && panel.lyricsHead === "Claudio 正在串场 · 全文" && panel.transcriptTiming === "plain-text" && panel.transcript.length >= 1 && panel.transcript.every((label) => label === "Claudio · 全文"), panel);
+    const bPlaying = await waitFor(() => view(tab), (v) => v.program?.itemId === b.itemId && v.program.started, 30000);
+    s.check("B follows the plain-text DJ", bPlaying.ok, bPlaying.last?.program);
+  },
+
+  /**
+   * Refresh while the DJ talks between an A that ended by itself and B
+   * (sequential A→DJ→B). A is finished; the listener's unfinished queue is B, C.
+   * After the reload nothing sounds and no voice comes back; only 播放 starts B,
+   * as a new occurrence, and A is not played again.
+   */
+  async "refresh-during-talk"(s) {
+    // A 20 s voice: the talk is surely still on when the page reloads.
+    await s.start({ config: { voiceDurationMs: 20000 } });
+    const tab = await s.tab("tab-A");
+    await s.executor(tab);
+    await chat(tab, "歌单");
+    const loaded = await waitFor(() => view(tab), (v) => v.transport === "idle" && v.queue.map((entry) => entry.mediaId).join(",") === "A,B,C", 15000);
+    if (!loaded.ok) throw new Error(`playlist not loaded: ${JSON.stringify(loaded.last)}`);
+    const [a, b, c] = loaded.last.queue;
+    await clickLabel(tab, "播放");
+    const aPlaying = await waitFor(() => view(tab), (v) => v.transport === "playing" && v.program?.itemId === a.itemId && v.program.started, 20000);
+    if (!aPlaying.ok) throw new Error(`A did not play: ${JSON.stringify(aPlaying.last)}`);
+
+    // A runs out by itself (no skip), then the transition voice talks before B.
+    await s.phase("a-ends-dj-talks");
+    await seekSlider(tab, 12);
+    const dj = await waitFor(() => view(tab), (v) => v.voice?.origin === "transition" && v.voice.status === "speaking" && v.transition?.from === a.itemId && v.transition.to === b.itemId && v.transition.phase === "talking", 25000, 80);
+    const talk = dj.ok ? await sequentialTalk(s, tab, a.itemId, b.itemId) : null;
+    const f = talk?.facts ?? {};
+    await delay(400);
+    await tab.capture("01-talking-before-refresh");
+    const stored = await tab.page.evaluate(() => JSON.parse(localStorage.getItem("claudio.playback.queue.v1") ?? "null"));
+    const atReload = await view(tab);
+    s.check(
+      "before the refresh, strict sequential talk: A's element ended, the A→B voice handle's element plays and advances, B silent with no receipt/started — and the reload happens while that voice is still on",
+      dj.ok && f.voiceCue && f.identity && f.voiceElement && f.assetIsCue && f.aEnded && f.bSilent && ["starting", "speaking"].includes(atReload.voice?.status) && atReload.transition?.phase === "talking" && atReload.program?.itemId === a.itemId,
+      { ...(talk?.evidence ?? { last: dj.last }), atReload: { voice: atReload.voice, transition: atReload.transition, program: atReload.program }, storedQueue: stored?.entries?.map((entry) => `${entry.track.mediaId}:${entry.origin}`) ?? null }
+    );
+
+    await s.phase("refresh");
+    const before = await s.state();
+    await tab.page.reload({ waitUntil: "domcontentloaded" });
+    await s.executor(tab);
+    // Sampled for 3 s: no element plays and no voice comes back by itself.
+    const samples = [];
+    const quietEnd = Date.now() + 3000;
+    while (Date.now() < quietEnd) {
+      const m = await moment(tab);
+      samples.push({ transport: m.snapshot?.transport ?? null, program: m.snapshot?.program?.item.track.mediaId ?? null, voice: m.snapshot?.voice?.status ?? null, queue: (m.snapshot?.queue ?? []).map((entry) => entry.item.track.mediaId), playing: m.media.filter((element) => !element.paused).map((element) => element.src) });
+      await delay(250);
+    }
+    const restored = await moment(tab);
+    const restoredQueue = restored.snapshot.queue.map((entry) => ({ itemId: entry.item.itemId, mediaId: entry.item.track.mediaId, origin: entry.item.origin }));
+    const notice = await tab.page.evaluate(() => document.body.innerText.includes("已恢复上次的队列，按播放继续"));
+    const afterReload = await s.state();
+    await tab.capture("02-restored-after-refresh");
+    const heads = restoredQueue.map((entry) => entry.mediaId);
+    s.check(
+      "after the refresh the unfinished queue is restored from B: the whole queue is exactly [B, C], the ended A nowhere in it, nothing is the program",
+      restored.snapshot.transport === "idle" && restored.snapshot.program === null && heads.length === 2 && heads[0] === "B" && heads[1] === "C" && !heads.includes("A"),
+      { restoredQueue, before: { a: a.itemId, b: b.itemId, c: c.itemId }, storedBeforeRefresh: stored?.entries?.map((entry) => `${entry.track.mediaId}:${entry.origin}`) ?? null }
+    );
+    s.check(
+      "nothing plays by itself after the refresh: idle, no voice, no playing element for 3 s, no new started; the listener is told",
+      samples.every((sample) => sample.transport === "idle" && sample.voice === null && sample.playing.length === 0) && afterReload.started.length === before.started.length && notice,
+      { samples: samples.filter((_, index) => index % 4 === 0), started: afterReload.started.length, notice }
+    );
+
+    await s.phase("play-after-refresh");
+    await clickLabel(tab, "播放");
+    const played = await waitFor(() => view(tab), (v) => v.transport === "playing" && v.program?.started, 20000);
+    const p1 = await moment(tab);
+    await delay(800);
+    const p2 = await moment(tab);
+    const program = played.last?.program ?? null;
+    const final = await serverState(s, program?.itemId);
+    const requests = await s.requests();
+    const bindings = streamBindings(requests);
+    const own = bindings.music.filter((entry) => entry.itemId === program?.itemId);
+    const moving = progressing(p1, p2).filter((element) => own.some((entry) => sameStream(element.src, entry.handle)));
+    const aSourcesAfter = bindings.music.filter((entry) => entry.mediaId === "A" && entry.seq > before.requestCount);
+    const startedA = final.started.filter((fact) => fact.track.mediaId === "A");
+    s.check(
+      "播放 after the refresh starts B as a new occurrence: confirmed started once under its new itemId, its own element advancing",
+      played.ok && program?.mediaId === "B" && program.itemId !== b.itemId && startedFor(final, program.itemId).length === 1 && moving.length === 1,
+      { program, moving, started: final.started.map((fact) => `${fact.track.mediaId}:${fact.itemId}`) }
+    );
+    s.check(
+      "A is not played again: no A source handed out after the refresh, A's only started fact is the first one, the old B occurrence never started",
+      aSourcesAfter.length === 0 && startedA.length === 1 && startedA[0].itemId === a.itemId && startedFor(final, b.itemId).length === 0,
+      { aSourcesAfter, startedA: startedA.map((fact) => fact.itemId), originalA: a.itemId }
+    );
+    await tab.capture("03-after-play");
+  },
+
+  /**
+   * Old-queue import across write boundaries, in the real page and its real
+   * localStorage. Storage states left by an interrupted import are seeded:
+   * after the backup write (before the commit), and after the commit (before
+   * the mark copy). Each new page load must import exactly once.
+   */
+  async migration(s) {
+    await s.start();
+    const legacy = JSON.stringify([{ songId: "B", djLine: "旧版串词" }, { songId: "C" }, { songId: "B" }]);
+    const playlist = JSON.stringify({ playlistId: "old", picks: [] });
+    const entry = (mediaId, origin) => ({ track: { providerId: "fixture", mediaId }, display: { title: mediaId, artist: "旧队列" }, origin });
+    const seededTab = async (label, seed) => {
+      s.context = await s.browser.createBrowserContext();
+      return s.tab(label, {
+        beforeLoad: {
+          fn: (items) => {
+            if (localStorage.getItem("claudio.e2e.seeded")) return;
+            localStorage.setItem("claudio.e2e.seeded", "1");
+            for (const [key, value] of Object.entries(items)) localStorage.setItem(key, value);
+          },
+          arg: seed
+        }
+      });
+    };
+    const storage = (tab) => tab.page.evaluate(() => {
+      const raw = localStorage.getItem("claudio.playback.queue.v1");
+      const parsed = raw ? JSON.parse(raw) : null;
+      return { queue: parsed?.entries?.map((entry) => `${entry.track.mediaId}:${entry.origin}`) ?? null, stamp: parsed?.legacyImport ?? null, mark: localStorage.getItem("claudio.legacy.import.v1"), old: localStorage.getItem("claudio.radioQueue"), backup: localStorage.getItem("claudio.legacy.backup.v1") };
+    });
+    const importLog = (tab) => tab.page.evaluate(() => window.__claudioPlayback.log().filter((entry) => entry.event === "legacy.import").map((entry) => entry.data));
+    const queueOf = (v) => v.queue.map((item) => `${item.mediaId}:${item.origin}`).join(",");
+    const backup = JSON.stringify({ version: 1, savedAt: "2026-10-16T00:00:00.000Z", keys: { "claudio.activePlaylist": playlist, "claudio.radioQueue": legacy } });
+
+    // 1. Interrupted after the backup write, before the commit; a newer queue (radio A) already exists.
+    const one = await seededTab("crash-before-commit", {
+      "claudio.radioQueue": legacy,
+      "claudio.activePlaylist": playlist,
+      "claudio.legacy.backup.v1": backup,
+      "claudio.playback.queue.v1": JSON.stringify({ version: 1, entries: [entry("A", "radio")] })
+    });
+    const first = await s.executor(one);
+    const firstStorage = await storage(one);
+    s.check(
+      "interrupted before the commit: the next start imports every old entry once, after the newer queue, repeats kept",
+      // Restored entries all come back as origin "restore"; the order shows the newer queue first.
+      queueOf(first) === "A:restore,B:restore,C:restore,B:restore" && (await importLog(one)).at(-1)?.status === "imported" && firstStorage.stamp?.status === "complete" && JSON.parse(firstStorage.mark ?? "{}").status === "complete",
+      { queue: first.queue, log: await importLog(one), stamp: firstStorage.stamp }
+    );
+    s.check("old keys untouched; the backup holds the original raw values", firstStorage.old === legacy && JSON.parse(firstStorage.backup).keys["claudio.radioQueue"] === legacy, { backup: firstStorage.backup?.slice(0, 160) });
+
+    // Runtime saves keep the stamp; with the mark copy gone a reload still does not import again.
+    await clickLabel(one, "播放");
+    await waitFor(() => view(one), (v) => v.transport === "playing" && v.program?.started, 15000);
+    await clickLabel(one, "下一首");
+    await waitFor(() => view(one), (v) => v.program?.mediaId === "B" && v.program.started, 15000);
+    await clickLabel(one, "暂停");
+    await waitFor(() => view(one), (v) => v.transport === "paused", 5000);
+    const saved = await storage(one);
+    await one.page.evaluate(() => localStorage.removeItem("claudio.legacy.import.v1"));
+    await one.page.reload({ waitUntil: "domcontentloaded" });
+    const reloaded = await s.executor(one);
+    const reloadedStorage = await storage(one);
+    s.check(
+      "after runtime queue saves and a lost mark copy, a reload does not import again (the stamp travels with the queue)",
+      saved.stamp?.status === "complete" && reloadedStorage.stamp?.status === "complete" && (await importLog(one)).at(-1)?.reason === "already-imported" && reloaded.queue.filter((item) => item.origin === "restore").length === saved.queue.filter((item) => item.endsWith(":restore")).length,
+      { saved, reloaded: reloaded.queue, log: await importLog(one) }
+    );
+    await one.page.close();
+
+    // 2. Interrupted after the commit, before the mark copy: nothing is imported twice.
+    const committed = [entry("B", "restore"), entry("C", "restore"), entry("B", "restore")];
+    const two = await seededTab("crash-after-commit", {
+      "claudio.radioQueue": legacy,
+      "claudio.activePlaylist": playlist,
+      "claudio.legacy.backup.v1": backup,
+      "claudio.playback.queue.v1": JSON.stringify({ version: 1, entries: committed, legacyImport: { version: 3, status: "complete", importedAt: "2026-10-16T00:00:00.000Z", imported: 3, skipped: [] } })
+    });
+    const second = await s.executor(two);
+    s.check("interrupted after the commit: the next start sees the stamp and imports nothing more", queueOf(second) === "B:restore,C:restore,B:restore" && (await importLog(two)).at(-1)?.reason === "already-imported", { queue: second.queue, log: await importLog(two) });
   }
 };
 

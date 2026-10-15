@@ -68,6 +68,10 @@ const defaults = () => ({
   ttsFail: false,
   ttsHold: false,
   voiceDurationMs: 3000,
+  // "ogg-labelled-wav": the WAV bytes are stored and described as Ogg, which the server's duration
+  // probe cannot read, so the voice asset's duration is "unknown". Served as audio/ogg; Chromium
+  // sniffs the real container.
+  voiceFormat: "wav",
   radioDelayMs: 0,
   radioFail: false,
   streamChunkDelayMs: 0,
@@ -188,7 +192,7 @@ const writer = {
 const tts = {
   configured: true,
   get descriptor() {
-    return { provider: "fixture-tone", model: "deterministic-pcm", voice: `tone-v${voiceVersion}`, format: "wav", options: JSON.stringify({ durationMs: config.voiceDurationMs, version: voiceVersion }) };
+    return { provider: "fixture-tone", model: "deterministic-pcm", voice: `tone-v${voiceVersion}`, format: config.voiceFormat === "ogg-labelled-wav" ? "ogg" : "wav", options: JSON.stringify({ durationMs: config.voiceDurationMs, version: voiceVersion }) };
   },
   async synthesize(text, { signal }) {
     counters.tts += 1;
@@ -347,6 +351,15 @@ app.use(express.json({ limit: "64kb" }));
 app.use((req, res, next) => {
   const entry = { seq: ++seq, phase, at: new Date().toISOString(), method: req.method, path: req.path, query: redact(req.query), client: String(req.headers["x-fixture-client"] ?? ""), range: req.headers.range ?? null, body: redact(req.body ?? null) };
   requests.push(entry);
+  // The JSON answers that hand out stream handles (prepare / preparation polls / resolve / narration) are
+  // kept with their request, so a check can tie a native element's src to the item or cue it was issued for.
+  if (/^\/api\/v1\/playback\/(prepare|preparations\/[^/]+|resolve|narration)$/.test(req.path)) {
+    const send = res.json.bind(res);
+    res.json = (body) => {
+      entry.response = redact(json(body ?? null));
+      return send(body);
+    };
+  }
   const started = performance.now();
   let logged = false;
   const finish = () => {
@@ -394,6 +407,8 @@ function patchConfig(patch) {
       if (value !== null && !ERROR_CLASSES.has(value)) throw new Error("invalid error class");
     } else if (key === "lyricsMode" && !LYRICS_MODES.includes(value)) {
       throw new Error("invalid lyricsMode");
+    } else if (key === "voiceFormat" && !["wav", "ogg-labelled-wav"].includes(value)) {
+      throw new Error("invalid voiceFormat");
     }
     object[key] = value;
   };
@@ -409,7 +424,7 @@ function patchConfig(patch) {
     }
   }
   if (next.voiceDurationMs < 100 || next.voiceDurationMs > 60000) throw new Error("voiceDurationMs must be 100..60000");
-  if (Object.keys(patch).some((key) => key.startsWith("tts") || key === "voiceDurationMs")) voiceVersion += 1;
+  if (Object.keys(patch).some((key) => key.startsWith("tts") || key === "voiceDurationMs" || key === "voiceFormat")) voiceVersion += 1;
   config = next;
   event("config-change", { config });
   return config;
