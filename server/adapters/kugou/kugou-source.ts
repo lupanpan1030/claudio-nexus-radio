@@ -263,11 +263,11 @@ export class KuGouMediaSource implements MediaSourcePort {
       throw appError("retryable", "kugou_stream_unreachable", error instanceof Error ? error.message : undefined, error);
     }
     if (response.status === 416) {
-      void response.body?.cancel();
+      void response.body?.cancel().catch(() => undefined);
       return { status: 416, headers: { "Content-Range": response.headers.get("content-range") ?? "bytes */*" }, body: null };
     }
     if (!response.ok || !response.body) {
-      void response.body?.cancel();
+      void response.body?.cancel().catch(() => undefined);
       throw appError(
         response.status === 403 || response.status === 404 || response.status === 410 ? "expired" : "retryable",
         "kugou_stream_failed",

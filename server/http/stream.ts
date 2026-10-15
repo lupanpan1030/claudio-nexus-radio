@@ -25,6 +25,11 @@ export async function pipeMediaStream(open: (signal: AbortSignal) => Promise<Med
     if (!signal.aborted) sendError(res, error);
     return;
   }
+  if (signal.aborted) {
+    // The client left while the source was opening: nobody will read this body.
+    releaseBody(stream.body);
+    return;
+  }
   res.status(stream.status);
   for (const [name, value] of Object.entries(stream.headers)) res.setHeader(name, value);
   res.setHeader("Cache-Control", "no-store");
@@ -41,9 +46,28 @@ export async function pipeMediaStream(open: (signal: AbortSignal) => Promise<Med
   }
 }
 
-/** A body that will never be read still holds its file or connection; let it go. */
+/**
+ * A body that will never be read still holds its file or connection; let it
+ * go. A Node stream is destroyed (closing its file descriptor); a fetch body
+ * (a WHATWG ReadableStream, which has no `return`) is cancelled, closing the
+ * upstream connection; any other async iterable is ended through its
+ * iterator. Failures are ignored: the body is being discarded either way.
+ */
 function releaseBody(body: MediaStream["body"]): void {
   if (!body) return;
-  if (body instanceof Readable) body.destroy();
-  else void (body as { return?: () => unknown }).return?.();
+  if (body instanceof Readable) {
+    body.destroy();
+    return;
+  }
+  const web = body as { cancel?: () => Promise<void>; locked?: boolean };
+  if (typeof web.cancel === "function") {
+    if (!web.locked) web.cancel().catch(ignore);
+    return;
+  }
+  const iterator = body[Symbol.asyncIterator]();
+  Promise.resolve()
+    .then(() => iterator.return?.())
+    .catch(ignore);
 }
+
+function ignore(): void {}

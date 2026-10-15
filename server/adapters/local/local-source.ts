@@ -196,9 +196,17 @@ function readBinding(binding: SourceBinding): LocalBinding {
  * Local files. The recording identity is the file's content hash, shared by
  * every catalog entry holding the same bytes; the revision is scoped to the
  * ref and the file, so two entries never share one, and a replaced or moved
- * file is a new revision. A handle never serves different bytes: each open
- * checks the descriptor it is about to stream from against the bound file
- * identity (and, where the file system cannot tell writes apart, the hash).
+ * file is a new revision.
+ *
+ * Each open checks the descriptor it is about to stream from against the
+ * bound file identity (and, where the file system cannot tell writes apart,
+ * the hash), so a file replaced or rewritten before the open is refused, and
+ * an atomic replace during a response leaves that response reading the old
+ * file object. What is checked is the state at open time, not a frozen copy:
+ * a writer that keeps modifying the same file in place while it is being
+ * streamed can still change the bytes later in that response. The next open
+ * then sees the changed identity and is refused. Bytes are not copied into an
+ * immutable store or re-hashed per Range request to close that gap.
  */
 export class LocalMediaSource implements MediaSourcePort {
   private readonly identityOf: FileIdentityReader;
