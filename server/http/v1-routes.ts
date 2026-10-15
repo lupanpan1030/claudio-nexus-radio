@@ -1,6 +1,8 @@
 import express, { type Request, type Response, type Router } from "express";
 import {
+  API_V1_EXTRA_PATHS,
   API_V1_PATHS,
+  API_V1_STREAM_HANDLE_PREFIX,
   asId,
   decode,
   lyricsRequestV1Decoder,
@@ -11,11 +13,15 @@ import {
   PROTOCOL_VERSION,
   resolveRequestV1Decoder,
   startedRequestV1Decoder,
+  type CandidateHistoryResponseV1,
+  type CatalogSearchResponseV1,
   type CueId,
   type Decoder,
   type LyricsResponseV1,
   type PreparationId,
-  type ResolveResponseV1
+  type ProtocolHandshakeV1,
+  type ResolveResponseV1,
+  type StartedHistoryResponseV1
 } from "@claudio/contracts";
 import { appError } from "../application/errors.js";
 import type { StartedService } from "../application/history/started-service.js";
@@ -44,18 +50,9 @@ export interface PlaybackServices {
   readonly serverInstanceId: string;
 }
 
-/** Paths this server adds beyond the shared API_V1_PATHS (reported as contract gaps). */
-export const V1_EXTRA_PATHS = Object.freeze({
-  protocol: "/api/v1/protocol",
-  streams: "/api/v1/playback/streams/:token",
-  narrationCue: "/api/v1/playback/narration/:cueId",
-  nowStream: "/api/v1/now/stream",
-  startedHistory: "/api/v1/history/started",
-  candidateHistory: "/api/v1/history/candidates",
-  catalogSearch: "/api/v1/catalog/search"
-});
-
-export const STREAM_HANDLE_PREFIX = "/api/v1/playback/streams/";
+/** Former local names of the shared extra paths / handle prefix; the contracts package owns the values. */
+export const V1_EXTRA_PATHS = API_V1_EXTRA_PATHS;
+export const STREAM_HANDLE_PREFIX = API_V1_STREAM_HANDLE_PREFIX;
 
 function body<T>(req: Request, res: Response, decoder: Decoder<T>): T | null {
   const result = decode(decoder, req.body);
@@ -75,14 +72,15 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
   const router = express.Router();
   const { preparations, cues, sources, streams, lyrics, started, now, audits, providers, policy } = services;
 
-  router.get(V1_EXTRA_PATHS.protocol, (_req, res) => {
-    res.json({
+  router.get(API_V1_EXTRA_PATHS.protocol, (_req, res) => {
+    const handshake: ProtocolHandshakeV1 = {
       protocolVersion: PROTOCOL_VERSION,
       playbackProtocol: mode,
       serverInstanceId: services.serverInstanceId,
-      paths: { ...API_V1_PATHS, ...V1_EXTRA_PATHS },
+      paths: { ...API_V1_PATHS, ...API_V1_EXTRA_PATHS },
       providers: providers.list().map((module) => ({ providerId: module.providerId, lyrics: Boolean(module.lyrics) }))
-    });
+    };
+    res.json(handshake);
   });
 
   // One switch: when the server runs the legacy protocol, v1 playback is closed (no half-migration).
@@ -159,7 +157,7 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
     }
   });
 
-  router.delete(V1_EXTRA_PATHS.narrationCue, (req, res) => {
+  router.delete(API_V1_EXTRA_PATHS.narrationCue, (req, res) => {
     const record = cues.cancel(asId<CueId>(String(req.params.cueId ?? "")));
     if (!record) return sendError(res, appError("unavailable", "cue_not_found"));
     res.json(cues.toResponse(record));
@@ -208,7 +206,7 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
     }
   });
 
-  router.get(V1_EXTRA_PATHS.nowStream, (req, res) => {
+  router.get(API_V1_EXTRA_PATHS.nowStream, (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
@@ -224,14 +222,14 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
     });
   });
 
-  router.get(V1_EXTRA_PATHS.streams, (req, res) => {
+  router.get(API_V1_EXTRA_PATHS.streams, (req, res) => {
     const token = String(req.params.token ?? "");
     void pipeMediaStream((signal) => streams.open(token, req.headers.range ?? null, signal), req, res);
   });
 
-  router.get(V1_EXTRA_PATHS.startedHistory, (req, res) => {
+  router.get(API_V1_EXTRA_PATHS.startedHistory, (req, res) => {
     const limit = queryNumber(req.query.limit, 50, 1, 200);
-    res.json({
+    const response: StartedHistoryResponseV1 = {
       protocolVersion: PROTOCOL_VERSION,
       semantics: "confirmed-started",
       started: started.recent(limit).map((fact) => ({
@@ -244,12 +242,13 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
         positionMs: fact.positionMs,
         sourceVerified: fact.sourceVerified
       }))
-    });
+    };
+    res.json(response);
   });
 
-  router.get(V1_EXTRA_PATHS.candidateHistory, (req, res) => {
+  router.get(API_V1_EXTRA_PATHS.candidateHistory, (req, res) => {
     const limit = queryNumber(req.query.limit, 20, 1, 100);
-    res.json({
+    const response: CandidateHistoryResponseV1 = {
       protocolVersion: PROTOCOL_VERSION,
       semantics: "candidate-selection",
       candidates: audits.recent(limit).map((audit) => ({
@@ -262,17 +261,19 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
         considered: audit.considered,
         createdAt: new Date(audit.createdAt).toISOString()
       }))
-    });
+    };
+    res.json(response);
   });
 
-  router.get(V1_EXTRA_PATHS.catalogSearch, (req, res) => {
+  router.get(API_V1_EXTRA_PATHS.catalogSearch, (req, res) => {
     const query = String(req.query.q ?? "");
     const limit = queryNumber(req.query.limit, 50, 1, 500);
     const entries = providers.list().flatMap((module) => module.catalog.search(query, limit));
-    res.json({
+    const response: CatalogSearchResponseV1 = {
       protocolVersion: PROTOCOL_VERSION,
       tracks: entries.slice(0, limit).map((entry) => ({ track: entry.ref, display: entry.display, playable: entry.playable }))
-    });
+    };
+    res.json(response);
   });
 
   return router;
