@@ -1,4 +1,4 @@
-import { asId, type CandidateV1, type ErrorInfo, type PreparedItemV1, type PlaybackCommand, type PlaybackSnapshot, type PreparationId, type QueueItemId } from "@claudio/contracts";
+import { PLAYBACK_OPERATION_BUDGETS, asId, type CandidateV1, type ErrorInfo, type PreparedItemV1, type PlaybackCommand, type PlaybackSnapshot, type PreparationId, type QueueItemId } from "@claudio/contracts";
 import type { ReservableIdFactory } from "@claudio/playback-core";
 import { PortError, hostTimers, silentLog, type DispatchResult, type LogPort, type Timers } from "@claudio/playback-web";
 import { errorInfoFromUnknown, stageFailure, type HttpPreparePort, type PreparationClient } from "./preparation";
@@ -15,9 +15,16 @@ export interface RefillPolicy {
   readonly maxAttempts: number;
   /** Delay before attempt n+1 (last value repeats). */
   readonly backoffMs: readonly number[];
+  /**
+   * Local bound on one attempt (POST plus long-polls until the candidate
+   * settles). A guard only: the server settles the candidate stage well
+   * within it. The attempt is a prepare's first half, so it shares the
+   * prepare operation budget.
+   */
+  readonly attemptDeadlineMs: number;
 }
 
-export const DEFAULT_REFILL_POLICY: RefillPolicy = Object.freeze({ maxAttempts: 3, backoffMs: [1500, 5000, 15_000] });
+export const DEFAULT_REFILL_POLICY: RefillPolicy = Object.freeze({ maxAttempts: 3, backoffMs: [1500, 5000, 15_000], attemptDeadlineMs: PLAYBACK_OPERATION_BUDGETS.prepare });
 
 export type RefillPhase =
   /** Nothing to do: the queue has a next item, or playback is stopped. */
@@ -61,6 +68,7 @@ interface InFlight {
   readonly controller: AbortController;
   readonly itemId: QueueItemId;
   preparationId: PreparationId | null;
+  deadline: unknown;
 }
 
 export interface RadioRefillOptions {
@@ -112,6 +120,11 @@ export function refillContext(snapshot: PlaybackSnapshot): Context | null {
  * core is no longer exhausted, so nothing starts. Only a listener's start from
  * an empty queue resumes, and only while its `autoplay` mark still stands.
  * Attempt/stop bookkeeping is kept for the current context only.
+ *
+ * Each attempt has a local deadline, independent of the HTTP client: a server
+ * that keeps answering "in progress" ends the attempt as a timed-out failure
+ * (counted against maxAttempts), and whatever that attempt receives later is
+ * cancelled, never queued.
  */
 export class RadioRefill {
   private readonly store: StatusStore<RefillStatus> = createStatusStore(IDLE);
@@ -224,11 +237,12 @@ export class RadioRefill {
 
   private async run(context: Context, user: UserStart | null): Promise<void> {
     const itemId = asId<QueueItemId>(this.options.ids.reserve("item"));
-    const flight: InFlight = { key: context.key, user, controller: new AbortController(), itemId, preparationId: null };
+    const flight: InFlight = { key: context.key, user, controller: new AbortController(), itemId, preparationId: null, deadline: null };
     this.inFlight = flight;
     const attempt = (this.attempts.get(context.key) ?? 0) + 1;
     this.attempts.set(context.key, attempt);
     this.publish({ phase: "selecting", userInitiated: user !== null, autoplay: user?.autoplay === true, attempts: attempt, lastError: null });
+    flight.deadline = this.timers.setTimeout(() => this.expire(flight, context, attempt), this.policy.attemptDeadlineMs);
     const { signal } = flight.controller;
     try {
       const started = await this.options.client.start(
@@ -255,7 +269,20 @@ export class RadioRefill {
       if (signal.aborted || this.disposed) return;
       if (flight.preparationId) void this.options.client.cancel(flight.preparationId);
       this.onFailure(context, user, errorInfoFromUnknown(error), attempt);
+    } finally {
+      this.timers.clearTimeout(flight.deadline);
     }
+  }
+
+  /** The attempt outlived its deadline: settle it here as a failure, whatever the network still does. */
+  private expire(flight: InFlight, context: Context, attempt: number): void {
+    if (this.inFlight !== flight || this.disposed) return;
+    this.inFlight = null;
+    flight.controller.abort();
+    this.options.ids.release(flight.itemId);
+    if (flight.preparationId) void this.options.client.cancel(flight.preparationId);
+    const error: ErrorInfo = { class: "retryable", code: "candidate_timed_out", message: `no radio candidate within ${this.policy.attemptDeadlineMs}ms` };
+    this.onFailure(context, flight.user, error, attempt);
   }
 
   private deliver(flight: InFlight, prepared: PreparedItemV1, candidate: CandidateV1): void {
@@ -331,6 +358,7 @@ export class RadioRefill {
     const flight = this.inFlight;
     if (!flight) return;
     this.inFlight = null;
+    this.timers.clearTimeout(flight.deadline);
     flight.controller.abort();
     this.options.ids.release(flight.itemId);
     if (flight.preparationId) void this.options.client.cancel(flight.preparationId);

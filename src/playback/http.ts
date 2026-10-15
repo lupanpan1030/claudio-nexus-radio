@@ -41,6 +41,8 @@ export function isAbortError(error: unknown): boolean {
  * A 2xx body that does not decode is `invalid/bad_response`, never trusted.
  */
 export async function requestJson<T>(fetchFn: FetchLike, request: JsonRequest, decoder: Decoder<T>): Promise<T> {
+  // Already cancelled: nothing is sent.
+  if (request.signal?.aborted) throw portError("retryable", "aborted", undefined, true);
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -48,7 +50,6 @@ export async function requestJson<T>(fetchFn: FetchLike, request: JsonRequest, d
     controller.abort();
   }, request.timeoutMs);
   const onAbort = () => controller.abort();
-  if (request.signal?.aborted) controller.abort();
   request.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     let response: Response;

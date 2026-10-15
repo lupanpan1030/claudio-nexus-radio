@@ -1,4 +1,5 @@
 import {
+  PLAYBACK_HTTP_TIMEOUTS,
   PROTOCOL_VERSION,
   isStageSettled,
   lyricsMatchRecording,
@@ -73,11 +74,12 @@ export class HttpCuePort implements CuePort {
   }
 }
 
+/** One POST per lookup; the server settles it within its lyrics budget, the client waits that plus a margin. */
 export class HttpLyricsPort implements LyricsPort {
   constructor(
     private readonly fetchFn: FetchLike,
     private readonly paths: ProtocolPaths,
-    private readonly timeoutMs = 12_000
+    private readonly timeoutMs: number = PLAYBACK_HTTP_TIMEOUTS.lyricsRequestMs
   ) {}
 
   async lookup(request: LyricsRequest, signal: AbortSignal): Promise<LyricsAvailability> {

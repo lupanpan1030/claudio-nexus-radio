@@ -1,4 +1,6 @@
 import {
+  PLAYBACK_BUDGETS,
+  PLAYBACK_HTTP_TIMEOUTS,
   PROTOCOL_VERSION,
   isNewerPreparation,
   isStageSettled,
@@ -23,13 +25,24 @@ import type { ProtocolPaths } from "./protocol";
 export interface PreparationTimings {
   /** Per long-poll wait the server is asked to hold (capped server-side). */
   readonly waitMs: number;
-  /** Client deadline per HTTP exchange; must exceed waitMs. */
+  /** Client deadline per long-poll exchange (POST prepare, GET preparation, POST narration); must exceed waitMs. */
   readonly requestTimeoutMs: number;
+  /** Client deadline of POST resolve, which the server answers only once the source settles. */
+  readonly resolveTimeoutMs: number;
   /** Deadline of the best-effort DELETE sent on cancel. */
   readonly cancelTimeoutMs: number;
 }
 
-export const DEFAULT_PREPARATION_TIMINGS: PreparationTimings = Object.freeze({ waitMs: 8000, requestTimeoutMs: 12_000, cancelTimeoutMs: 3000 });
+/**
+ * From the shared playback budget: every exchange leaves the server its own
+ * stage deadline plus a margin to report the terminal state itself.
+ */
+export const DEFAULT_PREPARATION_TIMINGS: PreparationTimings = Object.freeze({
+  waitMs: PLAYBACK_BUDGETS.longPollMs,
+  requestTimeoutMs: PLAYBACK_HTTP_TIMEOUTS.longPollRequestMs,
+  resolveTimeoutMs: PLAYBACK_HTTP_TIMEOUTS.resolveRequestMs,
+  cancelTimeoutMs: 3000
+});
 
 type StageName = keyof PreparedItemV1["stages"];
 
@@ -90,7 +103,7 @@ export class PreparationClient {
 
   async resolve(request: Omit<ResolveRequestV1, "protocolVersion">, signal: AbortSignal): Promise<ResolvedMedia> {
     const body: ResolveRequestV1 = { protocolVersion: PROTOCOL_VERSION, ...request };
-    const response = await requestJson(this.fetchFn, { method: "POST", path: this.paths.resolve, body, signal, timeoutMs: this.timings.requestTimeoutMs }, resolveResponseV1Decoder);
+    const response = await requestJson(this.fetchFn, { method: "POST", path: this.paths.resolve, body, signal, timeoutMs: this.timings.resolveTimeoutMs }, resolveResponseV1Decoder);
     if (response.itemId !== request.itemId) throw portError("invalid", "resolve_item_mismatch");
     if (!sameTrack(response.media.track, request.track)) throw portError("invalid", "resolve_track_mismatch");
     return resolvedMediaFromWire(response.media);

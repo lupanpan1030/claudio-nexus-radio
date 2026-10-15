@@ -38,7 +38,9 @@ export function interpretHandshake(httpStatus: number, body: unknown): ProtocolC
   return { status: "ready", serverInstanceId: handshake.serverInstanceId, paths: SHARED_PATHS };
 }
 
+/** Rejects with the abort (never a verdict) once `signal` is aborted, even before the request or after its body. */
 export async function checkProtocol(fetchFn: FetchLike, signal: AbortSignal, timeoutMs = 8000): Promise<ProtocolCheck> {
+  if (signal.aborted) throw abortReason(signal);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
@@ -46,6 +48,7 @@ export async function checkProtocol(fetchFn: FetchLike, signal: AbortSignal, tim
   try {
     const response = await fetchFn(PROTOCOL_PATH, { method: "GET", headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
     const body: unknown = await response.json().catch(() => null);
+    if (signal.aborted) throw abortReason(signal);
     return interpretHandshake(response.status, body);
   } catch (error) {
     if (signal.aborted) throw error;
@@ -54,6 +57,10 @@ export async function checkProtocol(fetchFn: FetchLike, signal: AbortSignal, tim
     clearTimeout(timer);
     signal.removeEventListener("abort", onAbort);
   }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
 }
 
 /** Fills a ":param" route template; values are URL-encoded. */

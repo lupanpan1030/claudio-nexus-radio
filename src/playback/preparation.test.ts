@@ -12,7 +12,7 @@ const item = (n: string) => asId<QueueItemId>(`item-${n}`);
 
 function setup() {
   const server = new FakePlaybackServer();
-  const client = new PreparationClient(server.fetch, TEST_PATHS, { waitMs: 50, requestTimeoutMs: 2000, cancelTimeoutMs: 500 });
+  const client = new PreparationClient(server.fetch, TEST_PATHS, { waitMs: 50, requestTimeoutMs: 2000, resolveTimeoutMs: 2000, cancelTimeoutMs: 500 });
   return { server, client, port: new HttpPreparePort(client) };
 }
 
@@ -76,7 +76,7 @@ test("server errors keep their class; undecodable bodies are invalid; failed sta
 });
 
 test("request deadline covers a hung server and is classified as timeout", async () => {
-  const hung = new PreparationClient((_input, init) => new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))), TEST_PATHS, { waitMs: 10, requestTimeoutMs: 30, cancelTimeoutMs: 10 });
+  const hung = new PreparationClient((_input, init) => new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))), TEST_PATHS, { waitMs: 10, requestTimeoutMs: 30, resolveTimeoutMs: 30, cancelTimeoutMs: 10 });
   await assert.rejects(new HttpPreparePort(hung).resolve({ opId: op(8), itemId: item("f"), track: ref("F"), purpose: "program", previousRevision: null }, new AbortController().signal), (error: unknown) => error instanceof PortError && error.info.code === "timeout");
 });
 
@@ -89,7 +89,7 @@ test("cue port long-polls narration until script and voice are ready and checks 
     const body = JSON.parse(String(init.body));
     return json(200, { protocolVersion: 1, cueId: body.cueId, transitionId: body.transitionId, version: calls, script: calls > 1 ? { status: "ready", value: script } : { status: "in-progress" }, voice: calls > 2 ? { status: "ready", value: voice } : { status: "pending" } });
   };
-  const cues = new HttpCuePort(fetchFn, TEST_PATHS, { preparationFor: () => null }, { waitMs: 10, requestTimeoutMs: 1000, cancelTimeoutMs: 100 });
+  const cues = new HttpCuePort(fetchFn, TEST_PATHS, { preparationFor: () => null }, { waitMs: 10, requestTimeoutMs: 1000, resolveTimeoutMs: 1000, cancelTimeoutMs: 100 });
   const binding = { cueId: asId<CueId>("cue-1"), transitionId: asId<TransitionId>("tr-1"), fromItemId: item("a"), toItemId: item("b"), fromRevision: null, toRevision: null } as const;
   const asset = await cues.request({ opId: op(9), binding, from: ref("A"), to: ref("B") }, new AbortController().signal);
   assert.equal(calls, 3);

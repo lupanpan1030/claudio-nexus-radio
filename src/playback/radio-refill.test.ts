@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import { asId, type CueAsset, type LyricsAvailability, type PlaybackSnapshot, type QueueItemId } from "@claudio/contracts";
 import { createSequentialIds, withReservations } from "@claudio/playback-core";
 import { createPlaybackRuntime, type PlaybackRuntime } from "@claudio/playback-web";
@@ -7,14 +7,24 @@ import { FakeDriver } from "@claudio/playback-web/testing";
 import { registerMediaSessionActions } from "../features/media-controls";
 import { PlaybackController, type OwnerServices } from "./controller";
 import { HttpPreparePort, PreparationClient } from "./preparation";
-import { RadioRefill, refillContext } from "./radio-refill";
+import { DEFAULT_REFILL_POLICY, RadioRefill, refillContext, type RadioRefillOptions } from "./radio-refill";
 import { FakePlaybackServer, ManualTimers, TEST_PATHS, flush, mediaWire, ref } from "./test-support";
 
+/**
+ * Every rig of the current test. The runtime's operation guards are real
+ * timers (the cue guard is the shared 166 s budget, and the cue port below
+ * never settles), so each test disposes its rigs, also when it fails.
+ */
+const liveRigs: { dispose(): Promise<void> }[] = [];
+afterEach(async () => {
+  for (const rig of liveRigs.splice(0)) await rig.dispose();
+});
+
 /** Real runtime + real core + fake driver, wired like the app's owner page, over a fake v1 server. */
-function ownerRig(options: { autoReady?: boolean } = {}) {
+function ownerRig(options: { autoReady?: boolean; client?: (client: PreparationClient) => RadioRefillOptions["client"]; policy?: RadioRefillOptions["policy"] } = {}) {
   const server = new FakePlaybackServer();
   server.autoReady = options.autoReady ?? true;
-  const client = new PreparationClient(server.fetch, TEST_PATHS, { waitMs: 50, requestTimeoutMs: 2000, cancelTimeoutMs: 200 });
+  const client = new PreparationClient(server.fetch, TEST_PATHS, { waitMs: 50, requestTimeoutMs: 2000, resolveTimeoutMs: 2000, cancelTimeoutMs: 200 });
   const prepare = new HttpPreparePort(client);
   const driver = new FakeDriver(() => 1000);
   const ids = withReservations(createSequentialIds("exec-test"));
@@ -39,9 +49,15 @@ function ownerRig(options: { autoReady?: boolean } = {}) {
     unlockAudio: () => runtime.unlockAudio()
   };
   const controller = new PlaybackController(host, () => owner);
-  const refill = new RadioRefill({ target: runtime, client, port: prepare, ids, userActionSeq: controller.getUserActionSeq, timers, policy: { maxAttempts: 3, backoffMs: [100] } });
+  const refill = new RadioRefill({ target: runtime, client: options.client?.(client) ?? client, port: prepare, ids, userActionSeq: controller.getUserActionSeq, timers, policy: { maxAttempts: 3, backoffMs: [100], ...options.policy } });
   owner = { refill, ids };
-  return { server, runtime, driver, refill, controller, timers, snapshot: (): PlaybackSnapshot => runtime.getSnapshot() };
+  liveRigs.push({
+    async dispose() {
+      refill.dispose();
+      await runtime.dispose();
+    }
+  });
+  return { server, runtime, driver, refill, controller, timers, ids, snapshot: (): PlaybackSnapshot => runtime.getSnapshot() };
 }
 
 const loadOf = (driver: FakeDriver) => driver.executed.filter((effect) => effect.type === "deck.load");
@@ -332,4 +348,100 @@ test("refill bookkeeping stays bounded over a long radio session", async () => {
     await startPlaying(rig);
   }
   assert.ok(rig.refill.trackedContexts <= 2, `tracked ${rig.refill.trackedContexts} contexts`);
+});
+
+test("an attempt the server keeps 'in progress' ends at the local deadline: counted, retried a bounded number of times, then given up", async () => {
+  const rig = ownerRig({ autoReady: false, policy: { attemptDeadlineMs: 1000 } });
+  // Legal, still-running answers: every version the server publishes keeps the candidate in progress.
+  const keepBusy = async (preparationId: string) => {
+    for (let round = 0; round < 3; round += 1) {
+      rig.server.publish(preparationId, { candidate: { status: "in-progress" } });
+      await flush();
+    }
+  };
+  rig.controller.togglePlay();
+  await flush();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const preparationId = `prep-${attempt}`;
+    await keepBusy(preparationId);
+    assert.equal(rig.refill.getStatus().phase, "selecting");
+    assert.ok(rig.server.count("GET", new RegExp(`/preparations/${preparationId}$`)) >= 3, "kept long-polling while in progress");
+    rig.timers.advance(999);
+    await flush();
+    assert.equal(rig.refill.getStatus().phase, "selecting", "not cut before the deadline");
+    rig.timers.advance(1);
+    await flush();
+    assert.equal(rig.server.count("DELETE", new RegExp(`/preparations/${preparationId}$`)), 1, "expired attempt cancelled on the server");
+    if (attempt < 3) {
+      assert.equal(rig.refill.getStatus().phase, "retry-wait");
+      assert.equal(rig.refill.getStatus().lastError?.code, "candidate_timed_out");
+      rig.timers.advance(100);
+      await flush();
+    }
+  }
+  const status = rig.refill.getStatus();
+  assert.equal(status.phase, "gave-up");
+  assert.equal(status.attempts, 3);
+  assert.equal(rig.server.count("POST", "/api/v1/playback/prepare"), 3, "bounded by maxAttempts");
+  assert.equal(rig.ids.reservedCount, 0, "no reserved item id left behind");
+  rig.timers.advance(60_000);
+  await flush();
+  assert.equal(rig.server.count("POST", "/api/v1/playback/prepare"), 3);
+  assert.equal(loadOf(rig.driver).length, 0);
+});
+
+test("a candidate that arrives after its attempt expired is cancelled and never queued, even from a client that ignores abort", async () => {
+  const late: { resolve: (value: Awaited<ReturnType<PreparationClient["waitForStage"]>>) => void; preparationId: string }[] = [];
+  const cancelled: string[] = [];
+  const rig = ownerRig({
+    autoReady: false,
+    policy: { attemptDeadlineMs: 1000 },
+    client: (real) => ({
+      start: (request, signal) => real.start(request, signal),
+      cancel: (preparationId) => {
+        cancelled.push(preparationId);
+        return real.cancel(preparationId);
+      },
+      // Never looks at the signal: only the refill's own deadline can end the attempt.
+      waitForStage: (current) => new Promise((resolve) => late.push({ resolve, preparationId: current.preparationId }))
+    })
+  });
+  rig.controller.togglePlay();
+  await flush();
+  assert.equal(late.length, 1);
+  rig.timers.advance(1000);
+  await flush();
+  assert.equal(rig.refill.getStatus().phase, "retry-wait");
+  assert.deepEqual(cancelled, ["prep-1"]);
+  const first = late[0]!;
+  first.resolve({
+    ...rig.server.preparations.get("prep-1")!.item,
+    version: 9,
+    status: "ready",
+    stages: { ...rig.server.preparations.get("prep-1")!.item.stages, candidate: { status: "ready", value: { track: ref("LATE"), display: null } } }
+  });
+  await flush();
+  const snapshot = rig.snapshot();
+  assert.equal(snapshot.queue.length, 0, "the late candidate is not queued");
+  assert.equal(snapshot.program, null);
+  assert.equal(rig.refill.getStatus().phase, "retry-wait", "the late answer changes nothing");
+  assert.equal(cancelled.filter((id) => id === "prep-1").length, 2, "and its preparation is cancelled again");
+  assert.equal(loadOf(rig.driver).length, 0);
+  // The retry runs normally and its own answer plays.
+  rig.timers.advance(100);
+  await flush();
+  assert.equal(late.length, 2);
+  late[1]!.resolve({
+    ...rig.server.preparations.get(late[1]!.preparationId)!.item,
+    version: 9,
+    status: "ready",
+    stages: { candidate: { status: "ready", value: { track: ref("R2"), display: null } }, source: { status: "ready", value: mediaWire(ref("R2")) } } as never
+  });
+  await flush();
+  assert.equal(rig.snapshot().program?.item.track.mediaId ?? rig.snapshot().queue[0]?.item.track.mediaId, "R2");
+});
+
+test("the attempt deadline comes from the shared prepare budget, not a local number", async () => {
+  const { PLAYBACK_OPERATION_BUDGETS } = await import("@claudio/contracts");
+  assert.equal(DEFAULT_REFILL_POLICY.attemptDeadlineMs, PLAYBACK_OPERATION_BUDGETS.prepare);
 });
