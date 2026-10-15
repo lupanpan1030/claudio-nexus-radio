@@ -1,3 +1,15 @@
+import type { TrackRef } from "@claudio/contracts";
+
+/** tracks.source values written by this server's scanners and imports. */
+export type KnownTrackSource = "main" | "kugou-cache" | "kugou-api";
+
+/**
+ * tracks.source exactly as stored. Values outside KnownTrackSource are kept
+ * verbatim rather than relabelled, so no provider is credited with a row it
+ * cannot serve; the composition's ref rule maps them to no TrackRef.
+ */
+export type TrackSource = KnownTrackSource | (string & {});
+
 export type TrackRecord = {
   id: string;
   title: string;
@@ -6,7 +18,7 @@ export type TrackRecord = {
   filePath: string;
   folder: string;
   extension: string;
-  source: "main" | "kugou-cache" | "kugou-api";
+  source: TrackSource;
   playable: boolean;
   size: number;
   addedAt: string;
@@ -21,8 +33,13 @@ export type TrackDto = Pick<
   "id" | "title" | "artist" | "album" | "extension" | "source" | "playable"
 >;
 
+/** v1 library row: the public fields plus the TrackRef the server maps it to (null = no provider serves it). */
+export type LibraryTrackDto = TrackDto & {
+  ref: TrackRef | null;
+};
+
 export type LibraryResponse = {
-  tracks: TrackDto[];
+  tracks: Array<TrackDto | LibraryTrackDto>;
   total: number;
 };
 

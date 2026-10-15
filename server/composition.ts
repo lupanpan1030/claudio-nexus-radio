@@ -19,6 +19,12 @@ export const KUGOU_PROVIDER = asId<ProviderId>("kugou");
 const LOCAL_SOURCES = ["main", "kugou-cache"] as const;
 const KUGOU_SOURCES = ["kugou-api"] as const;
 
+/**
+ * The one legacy row → TrackRef rule (library, recent history, radio, hooks).
+ * It names the same source lists each provider's catalog is built from, so a
+ * ref exists exactly when that catalog describes the row; any other stored
+ * source maps to null.
+ */
 export function legacyRefFor(row: { id: string; source: string }): TrackRef | null {
   const providerId = (KUGOU_SOURCES as readonly string[]).includes(row.source)
     ? KUGOU_PROVIDER
@@ -176,7 +182,11 @@ export async function createServices(env: NodeJS.ProcessEnv = process.env): Prom
   const playback = assemblePlayback({
     db: db.db,
     providers,
-    radio: new LegacyRulesRadioCandidates({ choose: radio.chooseRadioCandidate, toLegacyId, describeLegacy }),
+    radio: new LegacyRulesRadioCandidates({
+      choose: (options) => radio.chooseRadioCandidate({ ...options, servable: (track) => legacyRefFor(track) !== null }),
+      toLegacyId,
+      describeLegacy
+    }),
     writer: new LegacyModelScriptWriter(legacyDjLineGenerator({ getTrack: db.getTrack, generate: dj.generateDjLineForTrack }), llm.hasLlm),
     tts: new FishSpeechSynthesis({
       apiKey: config.fishTtsKey,

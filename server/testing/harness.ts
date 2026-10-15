@@ -32,6 +32,7 @@ export interface HarnessOptions {
   readonly policy?: Partial<PlaybackPolicy>;
   readonly mode?: "v1" | "legacy";
   readonly legacy?: Partial<LegacyApi>;
+  readonly hooks?: Partial<LegacyV1Hooks>;
 }
 
 export interface Harness {
@@ -95,7 +96,8 @@ export async function startHarness(options: HarnessOptions): Promise<Harness> {
     refForLegacyTrack: () => null,
     onKuGouAccountChanged: () => undefined,
     nowProjection: () => services.now.get(),
-    subscribeNow: (listener) => services.now.subscribe(listener)
+    subscribeNow: (listener) => services.now.subscribe(listener),
+    ...options.hooks
   };
   const { app, close } = createApp({
     playbackProtocol: options.mode ?? "v1",

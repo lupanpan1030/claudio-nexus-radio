@@ -946,9 +946,12 @@ export async function chooseRadioCandidate(options: {
   recentTrackIds: readonly string[];
   excludeTrackIds: ReadonlySet<string>;
   query?: string;
+  /** Rows some provider can serve; others never enter the pool. Defaults to every row. */
+  servable?: (track: Track) => boolean;
 }): Promise<RadioCandidateChoice | null> {
   const query = options.query ?? "";
-  const pool = preferApiCatalog(getTracks(5000, "", { playableOnly: true })).filter(
+  const servable = options.servable ?? (() => true);
+  const pool = preferApiCatalog(getTracks(5000, "", { playableOnly: true }).filter(servable)).filter(
     (track) => !options.excludeTrackIds.has(track.id)
   );
   if (pool.length === 0) return null;

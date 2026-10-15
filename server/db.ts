@@ -174,7 +174,8 @@ function rowToTrack(row: Record<string, unknown>): Track {
     filePath: String(row.file_path),
     folder: String(row.folder),
     extension: String(row.extension),
-    source: row.source === "kugou-api" ? "kugou-api" : row.source === "kugou-cache" ? "kugou-cache" : "main",
+    // Verbatim: an unrecognised source must not be relabelled as a served one.
+    source: String(row.source),
     playable: Number(row.playable ?? 1) === 1,
     size: Number(row.size),
     addedAt: String(row.added_at)

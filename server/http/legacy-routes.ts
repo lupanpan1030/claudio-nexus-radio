@@ -290,7 +290,9 @@ export function createLegacyRouter(legacy: LegacyApi, mode: "v1" | "legacy", hoo
   router.get("/api/library", (req, res) => {
     const query = String(req.query.q ?? "");
     const limit = Number(req.query.limit ?? 500);
-    res.json(legacy.toLibraryResponse(legacy.getTracks(limit, query, { searchFilePath: false }), legacy.countTracks()));
+    const tracks = legacy.getTracks(limit, query, { searchFilePath: false });
+    // v1 clients link rows to TrackRefs only through this server-stated ref.
+    res.json(legacy.toLibraryResponse(tracks, legacy.countTracks(), v1 ? hooks.refForLegacyTrack : undefined));
   });
 
   if (v1) {
