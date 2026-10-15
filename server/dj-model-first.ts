@@ -14,9 +14,10 @@ export async function generateModelFirstDjLine(input: {
   query?: string;
   reason?: string;
   contextProfile?: "full" | "minimal";
+  signal?: AbortSignal;
 }) {
   const contextProfile = input.contextProfile ?? "minimal";
-  const fewShotSelection = await selectDjFewShots(input.track);
+  const fewShotSelection = await selectDjFewShots(input.track, input.signal);
   const fallbackDecision = buildLockedDjFallbackDecision({
     track: input.track,
     say: "",
@@ -48,7 +49,8 @@ export async function generateModelFirstDjLine(input: {
     timeoutMs: Math.max(config.djAiTimeoutMs, 12000),
     reasoningEffort: config.djAiReasoningEffort,
     musicKnowledgeMode: "model-first",
-    minimalExecutionContract: true
+    minimalExecutionContract: true,
+    signal: input.signal
   });
 
   return {

@@ -31,7 +31,9 @@ type DjLineInput = {
   previousLine?: string;
   lineMode?: TrackLineMode;
   recentLinesOverride?: string[];
+  /** Skips the legacy history line write-back (radio_picks/audits/plays). */
   dryRun?: boolean;
+  signal?: AbortSignal;
 };
 
 type DjLineResult = {
@@ -65,8 +67,10 @@ export async function generateDjLine(input: DjLineInput): Promise<DjLineResult> 
     track,
     query: input.query,
     reason: input.reason,
-    contextProfile: "minimal"
+    contextProfile: "minimal",
+    signal: input.signal
   });
+  if (input.signal?.aborted) throw new Error("DJ line request was cancelled");
   const djLine = cleanLine(decision.say);
   const validation = validateLockedDjDecision({
     decision,

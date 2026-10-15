@@ -31,6 +31,8 @@ type LlmCallOptions = {
   timeoutMs?: number;
   reasoningEffort?: string;
   profile?: "default" | "chat";
+  /** Aborts the HTTP request and body read; an aborted call returns undefined without trying fallbacks. */
+  signal?: AbortSignal;
 };
 
 let lastProvider = "";
@@ -97,10 +99,12 @@ async function postChatCompletion(params: {
   key: string;
   body: Record<string, unknown>;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }) {
   const request = undiciFetch(`${params.baseUrl}/chat/completions`, {
       method: "POST",
       dispatcher: llmDispatcher,
+      signal: params.signal,
       headers: {
         Authorization: `Bearer ${params.key}`,
         "Content-Type": "application/json"
@@ -115,10 +119,12 @@ async function postResponses(params: {
   key: string;
   body: Record<string, unknown>;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }) {
   const request = undiciFetch(`${params.baseUrl}/responses`, {
       method: "POST",
       dispatcher: llmDispatcher,
+      signal: params.signal,
       headers: {
         Authorization: `Bearer ${params.key}`,
         "Content-Type": "application/json"
@@ -199,6 +205,7 @@ export async function callLlmText(
   if (attempts.length === 0) return undefined;
 
   for (const attempt of attempts) {
+    if (options.signal?.aborted) return undefined;
     const baseUrl = attempt.baseUrl.replace(/\/$/, "");
     const body: Record<string, unknown> = {
       model: attempt.model,
@@ -221,9 +228,11 @@ export async function callLlmText(
         baseUrl,
         key: attempt.key,
         body,
-        timeoutMs: options.timeoutMs
+        timeoutMs: options.timeoutMs,
+        signal: options.signal
       });
     } catch (error) {
+      if (options.signal?.aborted) return undefined;
       if (!isAbortLikeError(error)) {
         console.warn(`${label} ${attempt.provider} LLM request failed: ${error instanceof Error ? error.message : error}`);
         continue;
@@ -239,7 +248,8 @@ export async function callLlmText(
           baseUrl,
           key: attempt.key,
           body: retryBody,
-          timeoutMs: options.timeoutMs ? Math.round(options.timeoutMs * 1.5) : undefined
+          timeoutMs: options.timeoutMs ? Math.round(options.timeoutMs * 1.5) : undefined,
+          signal: options.signal
         });
       } catch (retryError) {
         console.warn(
@@ -259,7 +269,8 @@ export async function callLlmText(
           baseUrl,
           key: attempt.key,
           body: responsesBody,
-          timeoutMs: options.timeoutMs ? Math.round(options.timeoutMs * 1.5) : undefined
+          timeoutMs: options.timeoutMs ? Math.round(options.timeoutMs * 1.5) : undefined,
+          signal: options.signal
         });
         if (retryResponse.ok) {
           const retryData = (await retryResponse.json()) as ResponsesApiResponse;
@@ -283,7 +294,8 @@ export async function callLlmText(
           baseUrl,
           key: attempt.key,
           body: retryBody,
-          timeoutMs: options.timeoutMs
+          timeoutMs: options.timeoutMs,
+          signal: options.signal
         });
         if (retryResponse.ok) {
           const retryData = (await retryResponse.json()) as ChatCompletionResponse;

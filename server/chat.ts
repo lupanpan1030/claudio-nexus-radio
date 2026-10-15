@@ -9,6 +9,16 @@ import { getUserProfileDocs } from "./userProfile.js";
 import { getWeatherContext } from "./weather.js";
 import type { ChatReply, Track } from "./types.js";
 
+/**
+ * Injection points for the v1 composition: playability is checked with the
+ * new source resolvers and recency comes from confirmed listens. Defaults keep
+ * the legacy behaviour.
+ */
+export type ChatDeps = {
+  verifyPlayable?: (track: Track) => Promise<boolean>;
+  recentTracks?: () => Track[];
+};
+
 type PendingDirectCandidates = {
   candidates: Track[];
   expiresAt: number;
@@ -123,11 +133,16 @@ function directUnavailableReply(track: Pick<Track, "artist" | "title">) {
   return `我找到了 ${track.artist} 的《${track.title}》，但现在取不到可播放音源，所以没有把它插进队列。`;
 }
 
-async function playableDirectPick(track: Track) {
+async function legacyVerifyPlayable(track: Track) {
+  await resolvePlaybackSource(track.id);
+  return true;
+}
+
+async function playableDirectPick(track: Track, deps: ChatDeps) {
   try {
     upsertTracks([track]);
-    await resolvePlaybackSource(track.id);
-    return directTrackPick(track, "KuGou API");
+    const playable = await (deps.verifyPlayable ?? legacyVerifyPlayable)(track);
+    return playable ? directTrackPick(track, "KuGou API") : undefined;
   } catch {
     return undefined;
   }
@@ -262,7 +277,7 @@ async function conversationalReply(message: string) {
   return text?.trim() || idleReply();
 }
 
-export async function chatWithRadio(message: string): Promise<ChatReply> {
+export async function chatWithRadio(message: string, deps: ChatDeps = {}): Promise<ChatReply> {
   const clean = message.trim();
   const explicitQueueRequest =
     clean.includes("下一首") ||
@@ -287,7 +302,7 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
   const confirmedCandidate = pickPendingDirectCandidate(clean);
   if (confirmedCandidate) {
     clearDirectCandidates();
-    const resolved = await playableDirectPick(confirmedCandidate);
+    const resolved = await playableDirectPick(confirmedCandidate, deps);
     if (!resolved) {
       const reply = directUnavailableReply(confirmedCandidate);
       recordChatMessage("assistant", reply);
@@ -306,7 +321,7 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
   const direct = await resolveDirectTrack(clean, kuGouCatalogSearchPort);
   if (direct.match) {
     clearDirectCandidates();
-    const pick = await playableDirectPick(direct.match);
+    const pick = await playableDirectPick(direct.match, deps);
     if (!pick) {
       const reply = directUnavailableReply(direct.match);
       recordChatMessage("assistant", reply);
@@ -353,7 +368,7 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
     const modelDirect = await resolveDirectTrack(`播放 ${modelIntent.query}`, kuGouCatalogSearchPort);
     if (modelDirect.match) {
       clearDirectCandidates();
-      const pick = await playableDirectPick(modelDirect.match);
+      const pick = await playableDirectPick(modelDirect.match, deps);
       if (!pick) {
         const reply = directUnavailableReply(modelDirect.match);
         recordChatMessage("assistant", reply);
@@ -378,7 +393,12 @@ export async function chatWithRadio(message: string): Promise<ChatReply> {
     clearDirectCandidates();
     const weather = await getWeatherContext().catch(() => undefined);
     const scene = [clean, weather?.summary].filter(Boolean).join(" · ");
-    const playlist = await suggestPlaylist(scene, { count: 10, weather });
+    const playlist = await suggestPlaylist(scene, {
+      count: 10,
+      weather,
+      recent: deps.recentTracks?.(),
+      verifyPlayable: deps.verifyPlayable
+    });
     const reply = `今天先排这 ${playlist.picks.length} 首，我参考了你的历史品味、现在的时间${weather?.summary ? `和 ${weather.summary} 的天气` : ""}。`;
     recordChatMessage("assistant", reply);
     return { reply, playlist, weather };

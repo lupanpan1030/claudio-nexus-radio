@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const { toLibraryResponse, toTrackDto } = await import("./track-dto.ts");
@@ -42,8 +41,36 @@ test("library responses sanitize every non-empty record", () => {
 });
 
 test("library route uses the DTO boundary and disables locator search", async () => {
-  const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
-
-  assert.match(source, /toLibraryResponse\(getTracks\(limit, query, \{ searchFilePath: false \}\), countTracks\(\)\)/);
-  assert.doesNotMatch(source, /res\.json\(\{\s*tracks:\s*getTracks/);
+  // Behavioral replacement for the old index.ts text assertion: the route now lives in http/legacy-routes.ts.
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { startHarness } = await import("./testing/harness.ts");
+  const { ControlledWriter, FakeRadio, FakeSpeech } = await import("./testing/fakes.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claudio-library-route-"));
+  const calls = [];
+  const harness = await startHarness({
+    dir,
+    providers: [],
+    writer: new ControlledWriter(),
+    tts: new FakeSpeech(),
+    radio: new FakeRadio(() => []),
+    legacy: {
+      getTracks: (...args) => {
+        calls.push(args);
+        return [privateRecord()];
+      },
+      countTracks: () => 1,
+      toLibraryResponse
+    }
+  });
+  try {
+    const response = await harness.request("GET", "/api/library?q=secret-sentinel&limit=5");
+    assert.deepEqual(calls, [[5, "secret-sentinel", { searchFilePath: false }]]);
+    assert.deepEqual(Object.keys(response.json.tracks[0]).sort(), ["album", "artist", "extension", "id", "playable", "source", "title"]);
+    assert.doesNotMatch(JSON.stringify(response.json), /secret-sentinel|secret-provider-token/);
+  } finally {
+    await harness.close({ closeDb: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

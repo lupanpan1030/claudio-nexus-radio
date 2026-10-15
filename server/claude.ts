@@ -14,6 +14,7 @@ type ResolveDecisionParams = {
   reasoningEffort?: string;
   musicKnowledgeMode?: "restricted" | "model-first";
   minimalExecutionContract?: boolean;
+  signal?: AbortSignal;
 };
 
 type RawDecision = {
@@ -96,7 +97,8 @@ export async function resolveClaudeDecision(params: ResolveDecisionParams): Prom
       temperature: params.temperature ?? 0.4,
       model: params.model,
       timeoutMs: params.timeoutMs,
-      reasoningEffort: params.reasoningEffort
+      reasoningEffort: params.reasoningEffort,
+      signal: params.signal
     }
   );
 

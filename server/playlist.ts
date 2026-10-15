@@ -26,6 +26,9 @@ type PlaylistOptions = {
   weather?: WeatherContext;
   useAi?: boolean;
   recordHistory?: boolean;
+  /** Listening recency (most recent first); defaults to legacy plays/radio picks. */
+  recent?: Track[];
+  verifyPlayable?: (track: Track) => Promise<boolean>;
 };
 
 type AgentPlaylistTrack = {
@@ -527,7 +530,11 @@ export function importPendingInboxPlaylist(): PlaylistSuggestion | null {
 export async function suggestPlaylist(scene = "", options: PlaylistOptions = {}): Promise<PlaylistSuggestion> {
   const count = 10;
   if (options.useAi !== false) {
-    const result = await getRadioDecision(scene, options.weather, count, { useAi: true });
+    const result = await getRadioDecision(scene, options.weather, count, {
+      useAi: true,
+      recent: options.recent ? [...getRecentGeneratedPlaylistTracks(80), ...options.recent] : undefined,
+      verifyPlayable: options.verifyPlayable
+    });
     const picks = result.picks.slice(0, count);
     if (picks.length > 0) {
       if (picks.length < count) {
@@ -551,7 +558,9 @@ export async function suggestPlaylist(scene = "", options: PlaylistOptions = {})
 
   const docs = await getUserProfileDocs();
   const docsText = normalizeText(`${docs.taste}\n${docs.routines}\n${docs.moodRules}\n${docs.interviews}`);
-  const recent = [...getRecentGeneratedPlaylistTracks(80), ...getRecentPlays(20), ...getRecentRadioPickTracks(24)];
+  const recent = options.recent
+    ? [...getRecentGeneratedPlaylistTracks(80), ...options.recent]
+    : [...getRecentGeneratedPlaylistTracks(80), ...getRecentPlays(20), ...getRecentRadioPickTracks(24)];
   const tags = sceneTags(scene);
   const ranked = rankForPlaylist(tracks, docsText, scene, recent);
   const selected = choosePlaylistTracks(ranked, Math.min(count, tracks.length), tags);

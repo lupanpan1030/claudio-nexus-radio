@@ -213,6 +213,13 @@ export function getKuGouLoginStatus(): KuGouLoginStatus {
   };
 }
 
+/** Server-side only: credentials for the v1 KuGou adapters. Never serialize to clients. */
+export function getKuGouSessionCredentials(): { cookie: string; userid: string; loggedInAt: string } | null {
+  const session = readSession();
+  if (!session || isSessionExpired(session)) return null;
+  return { cookie: session.cookie, userid: session.userid, loggedInAt: session.loggedInAt };
+}
+
 export function logoutKuGou() {
   runtimeSession = null;
   try {

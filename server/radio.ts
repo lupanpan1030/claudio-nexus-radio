@@ -42,6 +42,10 @@ type DecisionResult = {
 
 type RadioDecisionOptions = {
   useAi?: boolean;
+  /** Listening recency (most recent first). Defaults to the legacy plays/picks/playlist tables. */
+  recent?: Track[];
+  /** Playability preflight. Defaults to the legacy KuGou URL resolver. */
+  verifyPlayable?: (track: Track) => Promise<boolean>;
 };
 
 function sample<T>(items: T[], size: number): T[] {
@@ -744,7 +748,15 @@ function recordNextAudit(query: string, pick: RadioPick, ranked: RankedTrack[]) 
   });
 }
 
-async function getRankedPool(query: string, size: number) {
+function legacyRecentTracks() {
+  return uniqueRecentTracks([
+    ...getRecentGeneratedPlaylistTracks(80),
+    ...getRecentPlays(18),
+    ...getRecentRadioPickTracks(36)
+  ]);
+}
+
+async function getRankedPool(query: string, size: number, recentOverride?: Track[]) {
   const tracks = getTracks(2000, query, { playableOnly: true });
   const sourceTracks = tracks.length > 0 ? tracks : getTracks(5000, "", { playableOnly: true });
   const apiPreferred = preferApiCatalog(sourceTracks);
@@ -753,11 +765,7 @@ async function getRankedPool(query: string, size: number) {
     throw new Error("曲库为空，请先扫描音乐目录。");
   }
 
-  const recent = uniqueRecentTracks([
-    ...getRecentGeneratedPlaylistTracks(80),
-    ...getRecentPlays(18),
-    ...getRecentRadioPickTracks(36)
-  ]);
+  const recent = recentOverride ? uniqueRecentTracks(recentOverride) : legacyRecentTracks();
   const sceneTags = nextSceneTags(query);
   const ranked = diversifyRanked(await rankCandidates(allTracks, recent, query), Math.min(size, allTracks.length), sceneTags, recent);
   return {
@@ -766,7 +774,20 @@ async function getRankedPool(query: string, size: number) {
   };
 }
 
-async function keepTracksWithPlaybackSource(ranked: RankedTrack[], minimum: number) {
+async function legacyVerifyPlayable(track: Track) {
+  try {
+    await resolvePlaybackSource(track.id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function keepTracksWithPlaybackSource(
+  ranked: RankedTrack[],
+  minimum: number,
+  verifyPlayable: (track: Track) => Promise<boolean> = legacyVerifyPlayable
+) {
   const available: RankedTrack[] = [];
   const batchSize = 8;
   // Keep the API-backed preflight bounded; GPT still makes the final choice.
@@ -775,14 +796,7 @@ async function keepTracksWithPlaybackSource(ranked: RankedTrack[], minimum: numb
   for (let start = 0; start < maxChecks && available.length < minimum; start += batchSize) {
     const batch = ranked.slice(start, start + batchSize);
     const resolved = await Promise.all(
-      batch.map(async (item) => {
-        try {
-          await resolvePlaybackSource(item.track.id);
-          return item;
-        } catch {
-          return null;
-        }
-      })
+      batch.map(async (item) => ((await verifyPlayable(item.track).catch(() => false)) ? item : null))
     );
     available.push(...resolved.filter((item): item is RankedTrack => item !== null));
   }
@@ -826,10 +840,11 @@ export async function getRadioDecision(
 ): Promise<DecisionResult> {
   const cleanCount = Math.max(1, Math.min(count, 12));
   const recentLines = recentDjLines();
-  const { ranked } = await getRankedPool(query, cleanCount > 1 ? 120 : 80);
+  const { ranked } = await getRankedPool(query, cleanCount > 1 ? 120 : 80, options.recent);
   const preflightRanked = await keepTracksWithPlaybackSource(
     ranked,
-    Math.max(cleanCount + 4, cleanCount * 2)
+    Math.max(cleanCount + 4, cleanCount * 2),
+    options.verifyPlayable
   );
   if (preflightRanked.length < cleanCount) {
     throw new Error("No tracks with a verified playback source are available.");
@@ -912,6 +927,44 @@ export async function getRadioDecision(
     picks,
     candidates,
     ranked: playableRanked
+  };
+}
+
+export type RadioCandidateChoice = {
+  track: Track;
+  reason: string;
+  ranked: Array<{ id: string; score: number }>;
+};
+
+/**
+ * Side-effect-free rules choice of one next track for the v1 preparation
+ * path: no playback preflight, no radio_picks/audit/plays writes. Recency is
+ * supplied by the caller (confirmed listens first); excluded ids are hard
+ * filters (reserved or recently failed candidates).
+ */
+export async function chooseRadioCandidate(options: {
+  recentTrackIds: readonly string[];
+  excludeTrackIds: ReadonlySet<string>;
+  query?: string;
+}): Promise<RadioCandidateChoice | null> {
+  const query = options.query ?? "";
+  const pool = preferApiCatalog(getTracks(5000, "", { playableOnly: true })).filter(
+    (track) => !options.excludeTrackIds.has(track.id)
+  );
+  if (pool.length === 0) return null;
+  const byId = new Map(getTracks(5000, "", {}).map((track) => [track.id, track]));
+  const recent = uniqueRecentTracks(
+    options.recentTrackIds.map((id) => byId.get(id)).filter((track): track is Track => Boolean(track))
+  );
+  const sceneTags = nextSceneTags(query);
+  const ranked = diversifyRanked(await rankCandidates(pool, recent, query), Math.min(80, pool.length), sceneTags, recent);
+  if (ranked.length === 0) return null;
+  const track = chooseNextTrack(ranked);
+  const sceneLine = sceneTags.length > 0 ? `scene tags ${sceneTags.join(" / ")}` : "scene unclear";
+  return {
+    track,
+    reason: `rules next-track candidate; ${sceneLine}`,
+    ranked: ranked.slice(0, 12).map((item) => ({ id: item.track.id, score: item.score }))
   };
 }
 

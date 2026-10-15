@@ -1,0 +1,11 @@
+{
+  "//": "Typecheck for server code while npm workspace links are not installed: maps @claudio/contracts to its source. Root builds use tsconfig.server.json.",
+  "extends": "../tsconfig.server.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "incremental": false,
+    "baseUrl": ".",
+    "paths": { "@claudio/contracts": ["../packages/contracts/src/index.ts"] }
+  },
+  "include": ["."]
+}

@@ -19,7 +19,7 @@ export async function readDjPersona() {
   return (await fs.readFile(personaPath, "utf8")).trim();
 }
 
-export async function selectDjFewShots(track: Track): Promise<DjFewShotSelection> {
+export async function selectDjFewShots(track: Track, signal?: AbortSignal): Promise<DjFewShotSelection> {
   const candidates = await readPositiveFewShots(track);
   const fallback = toSelection(candidates, "positive-library-fallback");
   if (candidates.length < 2) return fallback;
@@ -36,7 +36,8 @@ export async function selectDjFewShots(track: Track): Promise<DjFewShotSelection
     responseFormat: "json_object" as const,
     temperature: 0.2,
     model: config.djAiModel,
-    timeoutMs: Math.max(config.djAiTimeoutMs, 12000)
+    timeoutMs: Math.max(config.djAiTimeoutMs, 12000),
+    signal
   };
   const first = await callLlmText(messages, "dj-fewshot-selector", options);
   let selectedIds = first ? parseSelectedIds(first, candidates) : [];
