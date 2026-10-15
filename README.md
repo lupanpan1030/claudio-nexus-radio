@@ -22,30 +22,39 @@ Claudio 把两件事分开处理：本地系统负责选歌、队列和播放可
 - 自动 Radio 默认从已同步的 KuGou API 曲库中选择可验证的播放源；`MUSIC_LIBRARY_DIR` 可用于本地曲目扫描与直接播放。
 - 根据偏好、近期播放与时间调整选歌节奏，并保留天气、日历等环境信息作为可选上下文。
 - 由大模型 API 从正向范式库中选择与当前歌曲匹配的参考片段，再创作 DJ 台词；范式可按自己的审美在 `prompts/dj-fewshot.md` 中编写或替换。
-- 使用 Fish Audio 合成语音；不可用时仍保留文字台词，并返回浏览器回退标记。
-- 通过 React + Vite Web App、REST 与 SSE 让歌曲、台词、语音和页面状态保持一致。
+- 使用 Fish Audio 合成语音；准备失败或错过窗口时继续音乐，不在歌曲中途补播过期口播。
+- 歌曲歌词与 DJ 字幕分别跟随音乐和语音时钟；没有原生逐字时间时显示逐行或纯文本。
+- 可选接入固定版本的 Folia 歌词舞台；舞台失败时回退基本歌词，播放由独立执行器负责。
+- 支持 Web Locks 的浏览器在同一来源下保持一个音频执行页，其余页面观察；刷新后恢复停止态队列。
 
 ## 架构
 
-产品范围、播放核心重建、日常字幕与 DJ 曲间衔接、Folia 融合边界、实施顺序与验收，统一以 [Claudio 统一实施方案](CLAUDIO_IMPLEMENTATION_PLAN.zh-CN.md) 为唯一实施依据。当前决定是重建核心与服务合同、复用独立能力，不再以最小改动保护旧编排；该目标尚未实施。本 README 的功能与 API 说明仍描述当前代码，旧私人聆听、模块化和 Live OS 文档只作历史参考。
+产品范围、架构取舍、实施顺序、验证结果和剩余工作，统一以 [Claudio 统一实施方案](CLAUDIO_IMPLEMENTATION_PLAN.zh-CN.md) 为唯一实施依据。新的合同、核心、执行器、服务端和页面已落地，当前仍在完成集成回归；阶段提交不等于全部验收。旧私人聆听、模块化和 Live OS 文档只作历史参考。
 
 <p align="center">
   <img src="photos/claudio-core-implementation-architecture-refined-2026-08.png" alt="Claudio 核心工程架构" width="840" />
 </p>
 
-> 这张图展示产品级边界与数据流；具体可用能力、接口字段和可选依赖以本文后面的配置与 API 示例为准。当前项目是 React + Vite Web App，不把 PWA 安装能力作为前置条件。
+> 这张历史示意图用于理解产品方向；当前模块与验收以统一实施方案为准。应用使用 React + Vite，不要求先安装 PWA。
 
-核心边界只有三条：
+代码按职责组织：
 
-1. 本地系统先选择并锁定 `songId`，模型不能自行换歌。
-2. DJ 写作通过大模型 API，只读取人设、正向范式与当前锁定歌曲；它从 `prompts/dj-fewshot.md` 选择匹配的参考片段，再写作，不把未经整理的环境和历史数据直接塞进 prompt。
-3. 模型决策使用 `{ say, play, reason, segue }` 的严格 JSON contract；选歌可走规则路径，TTS 失败时保留文字台词和页面状态。
+| 位置 | 责任 |
+| --- | --- |
+| `packages/contracts` | 共享身份、请求/响应和运行时校验 |
+| `packages/playback-core` | 不依赖浏览器的队列、播放与转场状态转换 |
+| `packages/playback-web` | 唯一音频执行器、双音乐通道与语音通道、时钟、跨页所有权 |
+| `src/app`、`src/features`、`src/playback` | 应用装配、用户操作、HTTP适配与只读状态显示 |
+| `server/application`、`server/ports`、`server/adapters` | 准备歌曲、来源解析、歌词、文稿/TTS与真实开始记录 |
+| `src/stage` | 固定 Folia 构建的只读歌词适配，不控制音频 |
+
+选曲和准备不会写入已播历史；执行器确认歌曲实际开始后才提交 `started`。模型写稿绑定确定的歌曲与转场上下文，不能自行换歌。DJ 的写作参考仍来自 `prompts/dj-fewshot.md`。
 
 ## 快速开始
 
 ### 前置条件
 
-- Node.js 22.19.0 或更高版本
+- 推荐 Node.js 24（当前验证使用 24.19.0）
 - 一个可用的 KuGou-compatible 服务与可访问的 KuGou 曲库（自动 Radio 的默认播放路径）
 - 可选：OpenAI-compatible 或 DeepSeek 大模型 API Key，用于模型辅助的意图理解与 DJ 串词
 - 可选：Fish Audio API Key；`MUSIC_LIBRARY_DIR` 可用于本地曲目扫描与直接播放
@@ -55,6 +64,7 @@ git clone https://github.com/89630618/claudio-radio-wanfeng.git
 cd claudio-radio-wanfeng
 Copy-Item .env.example .env
 npm ci
+npm run build
 npm run dev
 ```
 
@@ -67,6 +77,7 @@ git clone https://github.com/89630618/claudio-radio-wanfeng.git
 cd claudio-radio-wanfeng
 cp .env.example .env
 npm ci
+npm run build
 npm run dev
 ```
 
@@ -113,65 +124,51 @@ Claudio 的界面头像作为产品资源随仓库提供；音乐文件、账号
 
 ## 输入与输出示例
 
-请求下一首：
+先检查前后端协议：
 
 ```bash
-curl -X POST http://localhost:3080/api/radio/next \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"下雨天想听点有节奏但不吵的歌"}'
+curl http://localhost:3080/api/v1/protocol
 ```
 
-返回值包含已锁定的歌曲 ID、选择原因与来源。字段会随运行数据变化：
+当前页面要求 `protocolVersion: 1` 与 `playbackProtocol: "v1"`。版本不匹配时不会启动执行器。共享字段和校验器位于 `packages/contracts/src/api`，主要接口如下：
 
-```json
-{
-  "songId": "kugou-track-id",
-  "djLine": "",
-  "reason": "scene and preference match",
-  "moodTags": ["weather"],
-  "source": "rules"
-}
-```
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/v1/playback/prepare` | 为指定队列条目准备曲目或电台候选，不记已播 |
+| `GET /api/v1/playback/preparations/:preparationId` | 读取/等待准备阶段变化 |
+| `POST /api/v1/playback/resolve` | 解析或刷新同一条目的实际媒体身份与播放句柄 |
+| `POST /api/v1/playback/narration` | 准备绑定前后曲目和转场的文稿/语音 |
+| `POST /api/v1/playback/lyrics` | 获取绑定实际录音版本的歌词 |
+| `POST /api/v1/playback/started` | 由执行器提交真实开始事实，幂等接收 |
+| `PUT /api/v1/now` | 当前执行器的低频只读投影，不控制播放 |
 
-为该歌曲生成主持人台词：
-
-```bash
-curl -X POST http://localhost:3080/api/dj/line \
-  -H 'Content-Type: application/json' \
-  -d '{"songId":"kugou-track-id","query":"下雨天想听点有节奏但不吵的歌"}'
-```
-
-接口返回运行信息与内部决策，核心 DJ 决策位于 `decision` 字段：
-
-```json
-{
-  "songId": "kugou-track-id",
-  "djLine": "用于 TTS 与字幕的 DJ 台词",
-  "source": "ai",
-  "usedLlm": true,
-  "decision": {
-    "say": "用于 TTS 与字幕的 DJ 台词",
-    "play": ["kugou-track-id"],
-    "reason": "仅供系统内部使用的推荐原因",
-    "segue": "fade_in"
-  }
-}
-```
+不要用手工调用 `started` 模拟试听。旧 `/api/radio/next`、直接播放源/流和旧 DJ 副作用入口在 v1 模式返回410；回退旧版本应使用对应的完整前后端检查点，不能将新页面接到旧协议。
 
 ## 开发与验证
 
 ```bash
-npm run smoke
+node scripts/test.mjs
+npm run typecheck:packages
 npm run build
 ```
 
-DJ 质量脚本需要已配置的曲库与外部服务；可用命令和参数以 `package.json` 为准。
+统一测试入口使用临时数据目录，分别运行包、服务端和UI测试并报告跳过项。KuGou上游兼容测试需要固定源码checkout：设置 `CLAUDIO_KUGOU_API_REVIEWED_DIR` 后可加 `--require-upstream`，缺失时不能把跳过说成已验证。浏览器执行器验证入口为 `npm run test:browser`，需可用的Chromium；具体运行证据与能力限制见统一实施方案。
+
+旧 `smoke` 脚本与DJ质量脚本不是新核心的完整验收。旧smoke会写入其配置的数据目录；DJ质量脚本依赖配置的曲库与外部服务。常规回归使用上述隔离测试入口；脚本参数以 `package.json` 和对应源码为准。
+
+可选Folia舞台使用独立仓库的已验证构建，导出到被git忽略的静态目录：
+
+```bash
+node scripts/folia-stage-export.mjs --stage ../claudio-folia-stage
+```
+
+此命令要求独立stage仓库已有干净构建，校验后更新主应用pin；不会从任意上游最新代码自动取版本。没有该构建或校验不匹配时，应用使用基本歌词。独立仓库的对应源码、构建信息与第三方许可随导出产物提供。
 
 ## 当前范围
 
 Claudio 当前专注于“可靠播放 + 有品味的表达”。歌词、热评、故事卡、复杂 scheduler 与未经验证的外部资料不在正式 DJ 写作链路内。
 
-统一方案中的 Folia 歌曲歌词展示属于待实现的可选展示层，与 DJ 写作输入分开；它尚不属于当前可用功能。
+Folia歌曲歌词舞台已接入为可选显示层，与DJ写作输入分开。真实账户、目标设备的后台行为和日常使用观察按统一实施方案单列；合成音频测试不能替代这些结果。
 
 ## 许可证
 
