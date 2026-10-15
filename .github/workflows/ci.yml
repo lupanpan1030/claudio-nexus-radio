@@ -1,0 +1,43 @@
+name: CI
+
+# Main/PR verification of the app itself. The Showcase workflow
+# (showcase-pages.yml) builds the separate `showcase` branch and is unrelated.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      # The reviewed KuGouMusicApi commit the upstream compatibility tests pin
+      # (server/test/kugou-upstream-and-autostart.test.mjs). Only its source is
+      # read by mocked tests: no account, no network, nothing started.
+      KUGOU_API_REPO: https://github.com/MakcRe/KuGouMusicApi.git
+      KUGOU_API_COMMIT: 06560e3e053bda1ab830750db6f645bab703f824
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - run: npm ci
+      - name: Fetch the pinned KuGou upstream source
+        run: |
+          dir="$RUNNER_TEMP/kugou-api-reviewed"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$KUGOU_API_REPO"
+          git -C "$dir" fetch -q --depth 1 origin "$KUGOU_API_COMMIT"
+          git -C "$dir" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$KUGOU_API_COMMIT"
+      # Every *.test.* in the tree, isolated (temp cwd, allowlisted env, no keys);
+      # a skipped upstream case fails the run instead of passing silently.
+      - run: node scripts/test.mjs --require-upstream --upstream "$RUNNER_TEMP/kugou-api-reviewed"
+      - run: npm run typecheck:packages
+      - run: npm run build
+      # Built output staged outside the source tree and imported with plain Node.
+      - run: node scripts/verify-artifact.mjs --out "$RUNNER_TEMP/artifact-check"

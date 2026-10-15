@@ -10,24 +10,26 @@
 //   node scripts/test.mjs [--group packages,server,ui] [--require-upstream]
 //
 // The KuGou upstream compatibility cases need the reviewed KuGouMusicApi
-// checkout at a fixed commit. Set CLAUDIO_KUGOU_API_REVIEWED_DIR to it; it is
-// the only extra variable passed through. Without it those cases skip and the
-// summary says "upstream NOT verified"; --require-upstream turns any skip of
-// them into a failure (CI uses it with a pinned checkout).
+// checkout at the fixed commit the test pins (06560e3e…, MakcRe/KuGouMusicApi).
+// Pass it with --upstream <dir> or CLAUDIO_KUGOU_API_REVIEWED_DIR; it is the
+// only extra variable passed through. Without it the variable still points at
+// a directory that does not exist (never at any machine-local default), those
+// cases skip and the summary says "upstream NOT verified"; --require-upstream
+// turns any skip of them into a failure (CI uses it with a pinned checkout).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { createWork, isolatedEnv, root, tsxLoader } from "./isolation.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { values: args } = parseArgs({
   options: {
     group: { type: "string" },
+    upstream: { type: "string" },
     "require-upstream": { type: "boolean", default: false }
   }
 });
+const upstreamDir = args.upstream ?? process.env.CLAUDIO_KUGOU_API_REVIEWED_DIR;
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".data", ".results", "dist", "dist-server", "dist-showcase", "private-assets", "user", "docs", "photos", "public"]);
 const TEST_FILE = /\.test\.(?:mjs|cjs|js|ts|tsx)$/;
@@ -52,27 +54,10 @@ function discover() {
   return groups;
 }
 
-function isolatedEnv(work) {
-  const dirs = { data: path.join(work, "data"), profile: path.join(work, "profile"), music: path.join(work, "music"), tmp: path.join(work, "tmp") };
-  for (const dir of Object.values(dirs)) fs.mkdirSync(dir, { recursive: true });
-  const closed = "http://127.0.0.1:9";
-  const env = {
-    PATH: process.env.PATH ?? "",
-    TMPDIR: dirs.tmp,
-    TZ: process.env.TZ ?? "UTC",
-    NODE_ENV: "test",
-    DATA_DIR: dirs.data,
-    USER_PROFILE_DIR: dirs.profile,
-    MUSIC_LIBRARY_DIR: dirs.music,
-    KUGOU_API_AUTOSTART: "false",
-    KUGOU_API_BASE_URL: closed,
-    AI_BASE_URL: closed,
-    CHAT_AI_BASE_URL: closed,
-    FISH_TTS_ENDPOINT: `${closed}/v1/tts`,
-    CLAUDIO_REPO_ROOT: root
-  };
-  if (process.env.CLAUDIO_KUGOU_API_REVIEWED_DIR) env.CLAUDIO_KUGOU_API_REVIEWED_DIR = path.resolve(process.env.CLAUDIO_KUGOU_API_REVIEWED_DIR);
-  return env;
+function testEnv(dirs) {
+  // Always explicit: an unset variable would let the test fall back to a path on the developer's machine.
+  const upstream = upstreamDir ? path.resolve(upstreamDir) : path.join(dirs.work, "kugou-upstream-not-provided");
+  return isolatedEnv(dirs, { CLAUDIO_KUGOU_API_REVIEWED_DIR: upstream });
 }
 
 /** Counts from the TAP stream; skipped cases are listed by name so a green run cannot hide them. */
@@ -85,9 +70,9 @@ function summarize(tap) {
 
 function runGroup(name, files) {
   if (files.length === 0) return { name, files: 0, status: 0, summary: null };
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), `claudio-test-${name}-`));
-  const tapFile = path.join(work, "result.tap");
-  const loaders = ["--import", path.join(root, "node_modules/tsx/dist/esm/index.mjs")];
+  const dirs = createWork(`test-${name}`);
+  const tapFile = path.join(dirs.work, "result.tap");
+  const loaders = ["--import", tsxLoader];
   // Server tests resolve @claudio/* to package sources through the existing workspace hook.
   if (name === "server") loaders.push("--import", path.join(root, "server/testing/register-workspace.mjs"));
   console.log(`\n=== ${name}: ${files.length} test files ===`);
@@ -103,10 +88,10 @@ function runGroup(name, files) {
       `--test-reporter-destination=${tapFile}`,
       ...files.map((file) => path.join(root, file))
     ],
-    { cwd: work, env: isolatedEnv(work), stdio: "inherit" }
+    { cwd: dirs.cwd, env: testEnv(dirs), stdio: "inherit" }
   );
   const tap = fs.existsSync(tapFile) ? fs.readFileSync(tapFile, "utf8") : "";
-  fs.rmSync(work, { recursive: true, force: true });
+  fs.rmSync(dirs.work, { recursive: true, force: true });
   return { name, files: files.length, status: result.status ?? 1, summary: summarize(tap) };
 }
 
@@ -124,7 +109,7 @@ for (const r of results) {
   for (const c of s?.skippedCases ?? []) console.log(`       skipped: ${c.name}${c.reason ? ` (${c.reason})` : ""}`);
   for (const c of s?.todoCases ?? []) console.log(`       todo: ${c.name}${c.reason ? ` (${c.reason})` : ""}`);
 }
-if (upstreamRan) console.log(upstreamSkips.length ? `upstream NOT verified: ${upstreamSkips.length} KuGou upstream cases skipped (set CLAUDIO_KUGOU_API_REVIEWED_DIR to the pinned checkout)` : "upstream verified against the pinned checkout");
+if (upstreamRan) console.log(upstreamSkips.length ? `upstream NOT verified: ${upstreamSkips.length} KuGou upstream cases skipped (pass --upstream <pinned checkout>)` : `upstream verified against the pinned checkout at ${path.resolve(upstreamDir)}`);
 
 let failed = results.some((r) => r.status !== 0);
 if (args["require-upstream"] && upstreamRan && upstreamSkips.length > 0) {
