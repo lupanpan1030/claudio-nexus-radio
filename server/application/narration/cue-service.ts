@@ -22,6 +22,7 @@ import { raceAbort, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
 import { advance, inProgress, pending, ready, settledFromError, skipped, terminate } from "../stages.js";
 import { Watchers } from "../watchers.js";
+import { MAX_NARRATION_TEXT_LENGTH } from "./limits.js";
 import type { VoiceService } from "./voice-service.js";
 
 export interface CueEndpoint {
@@ -203,8 +204,10 @@ export class CueService {
           scoped.signal
         );
         throwIfAborted(scoped.signal);
-        const text = written.text.trim().slice(0, 4000);
+        const text = written.text.trim();
         if (!text) throw appError("unavailable", "script_empty", "script writer returned no text");
+        // Rejected, never cut: a shortened line would no longer be the line the writer wrote.
+        if (text.length > MAX_NARRATION_TEXT_LENGTH) throw appError("invalid", "script_too_long", "script writer returned more text than narration allows");
         script = {
           assetId: asId<AssetId>(ids.next("scr")),
           version: 1,

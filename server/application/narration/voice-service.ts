@@ -8,9 +8,9 @@ import { appError, throwIfAborted } from "../errors.js";
 import { raceAbort, SharedFlight, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
 import type { StreamHandles } from "../sources.js";
+import { MAX_NARRATION_TEXT_LENGTH } from "./limits.js";
 
 const VOICE_CACHE_NAMESPACE = "claudio.voice.v2";
-const MAX_VOICE_TEXT = 500;
 /** Shorter outputs are treated as provider failures (kept from the existing Fish integration). */
 const MIN_AUDIO_BYTES = 128;
 
@@ -48,7 +48,7 @@ export class VoiceService {
     const { tts, cache, files, clock, policy } = this.deps;
     const text = input.text.trim();
     if (!text) throw appError("invalid", "voice_text_empty");
-    if (text.length > MAX_VOICE_TEXT) throw appError("invalid", "voice_text_too_long");
+    if (text.length > MAX_NARRATION_TEXT_LENGTH) throw appError("invalid", "voice_text_too_long");
     if (!tts.configured) throw appError("unavailable", "tts_not_configured", "speech synthesis is not configured");
 
     const key = this.contentKey(text);

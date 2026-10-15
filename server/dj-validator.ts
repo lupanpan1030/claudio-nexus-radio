@@ -1,3 +1,4 @@
+import { MAX_NARRATION_TEXT_LENGTH } from "./application/narration/limits.js";
 import type { Track } from "./types.js";
 
 export type TrackLineMode =
@@ -320,7 +321,7 @@ export function invalidDjLineReason(line: string, recentLines: string[], track?:
 export function invalidContextDjLineReason(line: string, track: Track) {
   const clean = line.trim();
   if (clean.length < 20) return "too short";
-  if (clean.length > 600) return "too long";
+  if (clean.length > MAX_NARRATION_TEXT_LENGTH) return "too long";
   if (realWeatherClaimPattern.test(clean)) return "unverified real weather claim";
   if (track && isClearlyInstrumental(track) && vocalFactPattern.test(clean) && !explicitNoVocalPattern.test(clean)) return "vocal wording for instrumental track";
   return "";
