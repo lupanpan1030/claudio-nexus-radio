@@ -250,3 +250,69 @@ test("a provider that reuses a revision for another ref is refused instead of re
     await harness.close({ closeDb: true });
   }
 });
+
+function resolveBody(itemId, track, preparationId, previousRevision, reason = "refresh") {
+  return { protocolVersion: 1, itemId, track, preparationId, reason, previousRevision };
+}
+
+test("a resolve naming a preparation must refresh that preparation's own item and track; the refresh chain may move past its first revision", async () => {
+  const provider = new FakeProvider("fixture-r");
+  const a = provider.add(fakeTrack("r1", 3));
+  const b = provider.add(fakeTrack("r2", 4));
+  const drifting = provider.add(fakeTrack("r3", 5, { continuityUnprovable: true }));
+  const harness = await harnessWith(tempDir(), [provider.module()]);
+  const prepare = (itemId, track) =>
+    harness.request("POST", "/api/v1/playback/prepare", { protocolVersion: 1, itemId, purpose: "program", target: { kind: "track", track }, narration: null, wantLyrics: false });
+  try {
+    const prepared = (await prepare("item-a", a)).json;
+    const media = prepared.stages.source.value;
+    const code = async (body) => {
+      const response = await harness.request("POST", "/api/v1/playback/resolve", body);
+      return response.status === 200 ? 200 : `${response.status}:${response.json.error.code}`;
+    };
+    assert.equal(await code(resolveBody("item-a", b, prepared.preparationId, media.sourceRevision)), "400:preparation_track_mismatch", "same item, other track");
+    assert.equal(await code(resolveBody("item-other", a, prepared.preparationId, media.sourceRevision)), "400:preparation_mismatch");
+    assert.equal(await code(resolveBody("item-a", a, "prep_unknown", media.sourceRevision)), "400:preparation_mismatch");
+    const failed = (await prepare("item-gone", { providerId: "fixture-r", mediaId: "missing" })).json;
+    assert.equal(failed.stages.candidate.status, "failed");
+    assert.equal(await code(resolveBody("item-gone", { providerId: "fixture-r", mediaId: "missing" }, failed.preparationId, null)), "400:preparation_without_candidate");
+    const refreshed = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-a", a, prepared.preparationId, media.sourceRevision));
+    assert.equal(refreshed.status, 200);
+    assert.equal(refreshed.json.media.sourceRevision, media.sourceRevision, "same recording, same revision");
+
+    // A source that cannot prove continuity moves to a new revision on each refresh; the next refresh starts from that one.
+    const moving = (await prepare("item-c", drifting)).json;
+    const r0 = moving.stages.source.value.sourceRevision;
+    const r1 = (await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-c", drifting, moving.preparationId, r0))).json.media.sourceRevision;
+    const r2 = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-c", drifting, moving.preparationId, r1));
+    assert.equal(r2.status, 200, "the chain is not pinned to the preparation's first revision");
+    assert.ok(new Set([r0, r1, r2.json.media.sourceRevision]).size === 3);
+  } finally {
+    await harness.close({ closeDb: true });
+  }
+});
+
+test("a known previous revision of another track is refused; an unknown one re-locates and keeps a revision only when the provider proves it", async () => {
+  const provider = new FakeProvider("fixture-p");
+  const a = provider.add(fakeTrack("p1", 6));
+  const b = provider.add(fakeTrack("p2", 7));
+  const drifting = provider.add(fakeTrack("p3", 8, { continuityUnprovable: true }));
+  const harness = await harnessWith(tempDir(), [provider.module()]);
+  try {
+    const first = await resolve(harness, "item-a", a);
+    const foreign = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-b", b, null, first.sourceRevision));
+    assert.equal(foreign.status, 400);
+    assert.equal(foreign.json.error.code, "previous_revision_mismatch");
+
+    const calls = provider.resolveCalls;
+    const unknown = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-a", a, null, "fixture-p-never-issued"));
+    assert.equal(unknown.status, 200);
+    assert.equal(provider.resolveCalls, calls + 1, "re-located");
+    assert.equal(unknown.json.media.sourceRevision, first.sourceRevision, "the same content proves the same recording again");
+    const lost = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-c", drifting, null, "fixture-p-never-issued"));
+    const again = await harness.request("POST", "/api/v1/playback/resolve", resolveBody("item-c", drifting, null, "fixture-p-never-issued"));
+    assert.notEqual(lost.json.media.sourceRevision, again.json.media.sourceRevision, "no continuity is invented");
+  } finally {
+    await harness.close({ closeDb: true });
+  }
+});

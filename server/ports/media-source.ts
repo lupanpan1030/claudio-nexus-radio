@@ -62,4 +62,22 @@ export interface MediaStream {
 export interface MediaSourcePort {
   resolve(ref: TrackRef, context: ResolveContext): Promise<ResolvedSource>;
   open(binding: SourceBinding, request: StreamRequest): Promise<MediaStream>;
+  /**
+   * Optional cheap "could this play right now?" for list filtering (no content
+   * hashing, no network). Never an identity proof: playback still resolves.
+   * Without it, callers fall back to a short-lived memo of real resolves.
+   */
+  checkPlayable?(ref: TrackRef, signal: AbortSignal): Promise<boolean>;
+  /**
+   * Optional cheap key that changes whenever earlier playability answers may
+   * no longer hold (e.g. the signed-in account); part of the memo key.
+   */
+  playabilityScope?(): string;
+  /**
+   * Optional: the binding with its short-lived private parts (signed URLs,
+   * account tokens) removed, keeping what a later refresh needs to prove
+   * continuity; null when it holds nothing private. A scrubbed binding must
+   * open as `expired` so the caller resolves again.
+   */
+  scrubBinding?(binding: SourceBinding): SourceBinding | null;
 }

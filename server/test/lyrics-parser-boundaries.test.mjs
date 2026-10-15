@@ -180,7 +180,8 @@ function serviceFixture() {
     duration: { kind: "unknown" },
     binding: {},
     firstSeenAt: 1,
-    lastSeenAt: 1
+    lastSeenAt: 1,
+    expiresAt: null
   };
   stores.resolvedSources.upsert(record);
   const service = new LyricsService({ providers, resolvedSources: stores.resolvedSources, store: stores.lyrics, clock: { now: () => 5 }, policy: DEFAULT_PLAYBACK_POLICY });

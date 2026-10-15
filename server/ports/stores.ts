@@ -85,6 +85,8 @@ export interface StoredScript {
 
 export interface ScriptStore {
   insert(entry: StoredScript): void;
+  /** Most recent first: scripts that were generated, whether or not they were ever heard. */
+  recent(limit: number): readonly { readonly text: string; readonly writer: string; readonly createdAt: number }[];
 }
 
 export interface VoiceCacheEntry {
@@ -119,11 +121,21 @@ export interface StreamHandleRecord {
   /** Record kept (for in-flight range requests) until this epoch ms. */
   readonly retainUntil: number;
   readonly createdAt: number;
+  /**
+   * When the first successful open was admitted (epoch ms); null = never
+   * opened. Says only that some loader opened the handle — not that media
+   * played, and not which of several loads of the same handle a request is.
+   */
+  readonly firstOpenedAt: number | null;
 }
 
 export interface StreamHandleStore {
-  insert(record: StreamHandleRecord): void;
+  insert(record: Omit<StreamHandleRecord, "firstOpenedAt">): void;
   get(token: string): StreamHandleRecord | null;
+  /** Records the first successful open; later calls keep the first time. */
+  markOpened(token: string, admittedAt: number): void;
+  /** Source revisions whose handles are still retained at `now`. */
+  retainedRevisions(now: number): ReadonlySet<string>;
   /** Marks every handle of a provider whose binding matches as no longer loadable. */
   revokeWhere(providerId: ProviderId, predicate: (binding: SourceBinding) => boolean): number;
   deleteRetainedBefore(before: number): number;
@@ -140,11 +152,23 @@ export interface ResolvedSourceRecord {
   readonly binding: SourceBinding;
   readonly firstSeenAt: number;
   readonly lastSeenAt: number;
+  /** Provider load deadline of `binding` (epoch ms); null = none given, or recorded before it was kept. */
+  readonly expiresAt: number | null;
+  /** When the binding's private parts were erased (or found to have none); null = not yet. */
+  readonly bindingScrubbedAt: number | null;
 }
 
 export interface ResolvedSourceStore {
-  upsert(record: ResolvedSourceRecord): void;
+  /** A new resolution replaces the binding and clears any earlier scrub. */
+  upsert(record: Omit<ResolvedSourceRecord, "bindingScrubbedAt">): void;
   get(sourceRevision: SourceRevision): ResolvedSourceRecord | null;
+  /**
+   * Unscrubbed records whose binding expired before `before` (records without
+   * a deadline count from lastSeenAt + fallbackTtlMs), oldest first.
+   */
+  listScrubbable(before: number, fallbackTtlMs: number, limit: number): readonly ResolvedSourceRecord[];
+  /** Replaces the binding with its scrubbed form, only if it is still the one that was read. */
+  markScrubbed(sourceRevision: SourceRevision, expectedLastSeenAt: number, binding: SourceBinding, at: number): boolean;
 }
 
 export interface LyricsAssetStore {
@@ -183,6 +207,11 @@ export interface ListeningHistoryPort {
 
 export interface ReservationStore {
   reserve(entry: { itemId: QueueItemId; preparationId: PreparationId; track: TrackRef; until: number; at: number }): void;
+  /**
+   * Check-and-reserve in one synchronous step: false (nothing written) when
+   * another item holds or a cooldown covers the same ref at `at`.
+   */
+  tryReserve(entry: { itemId: QueueItemId; preparationId: PreparationId; track: TrackRef; until: number; at: number }): boolean;
   release(itemId: QueueItemId): void;
   releasePreparation(preparationId: PreparationId): void;
   /** Keeps the ref excluded until `until` (failed source), detached from any item. */

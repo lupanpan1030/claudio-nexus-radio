@@ -40,6 +40,8 @@ type BuildContextParams = {
   includeRecentPlays?: boolean;
   minimalDjContext?: boolean;
   djFewShotContent?: string;
+  /** Formatted hand-over block (previous track, recent started tracks, recent generated lines); omitted when empty. */
+  djHandoverContext?: string;
 };
 
 function formatBlock(title: string, content: string) {
@@ -120,7 +122,7 @@ export async function buildContext(params: BuildContextParams): Promise<ContextA
   const minimalDjContext = params.mode === "dj-line" && params.djContentMode === "model-first" && params.minimalDjContext === true;
   if (minimalDjContext) {
     const systemPrompt = await buildDjSystemPrompt(params.currentTrack, params.djFewShotContent);
-    const userInputContext = formatBlock(
+    const currentSong = formatBlock(
       "Current Song",
       [
         `当前点播歌曲：${params.currentTrack?.artist || ""}《${params.currentTrack?.title || ""}》`,
@@ -129,6 +131,9 @@ export async function buildContext(params: BuildContextParams): Promise<ContextA
         params.userMessage || "请为这首歌写一段可直接播出的私人电台串词。"
       ].join("\n")
     );
+    const userInputContext = params.djHandoverContext?.trim()
+      ? `${currentSong}\n\n${formatBlock("Hand-over", params.djHandoverContext)}`
+      : currentSong;
     const messages = [
       { role: "system" as const, content: systemPrompt },
       { role: "user" as const, content: `Mode: ${params.mode}\n\n${userInputContext}` }

@@ -1,14 +1,27 @@
-import type { ExecutorInstanceId, NowProjectionV1 } from "@claudio/contracts";
-import { appError } from "../errors.js";
+import { nowConflictFor, type NowConflictV1, type NowProjectionV1 } from "@claudio/contracts";
+import { AppError } from "../errors.js";
+
+/** A refused projection; carries the shared 409 body naming the accepted owner. */
+export class NowConflictError extends AppError {
+  constructor(readonly conflict: NowConflictV1) {
+    super(conflict.error.class, conflict.error.code, `${conflict.reason}: current generation ${conflict.current.generation}`);
+  }
+}
 
 /**
- * Observation-only projection of the single executor. Keeps the highest seq
- * of the current executor instance; a superseded instance cannot write
- * again. Accepting a projection never starts or advances playback.
+ * Observation-only projection of the single executor, ordered by the shared
+ * contract rule: a larger same-origin generation takes over; within one
+ * generation only the same instance with a larger seq is newer; anything
+ * else is refused with the current owner's generation/instance/seq so a
+ * page whose stored counter was lost can step past it once. Generations are
+ * only as good as the executor's same-origin counter: two devices or
+ * browser profiles count separately and are not arbitrated here.
+ *
+ * Memory only: after a server restart the first valid projection sets the
+ * state again. Accepting a projection never starts or advances playback.
  */
 export class NowService {
   private current: NowProjectionV1 | null = null;
-  private readonly superseded = new Set<ExecutorInstanceId>();
   private readonly listeners = new Set<(projection: NowProjectionV1) => void>();
 
   get(): NowProjectionV1 | null {
@@ -16,18 +29,8 @@ export class NowService {
   }
 
   accept(projection: NowProjectionV1): NowProjectionV1 {
-    const current = this.current;
-    if (this.superseded.has(projection.executorInstanceId)) {
-      throw appError("invalid", "superseded_executor", "a newer executor instance owns the projection");
-    }
-    if (current && current.executorInstanceId === projection.executorInstanceId && projection.seq <= current.seq) {
-      throw appError("invalid", "stale_projection", `seq ${projection.seq} is not newer than ${current.seq}`);
-    }
-    if (current && current.executorInstanceId !== projection.executorInstanceId) {
-      this.superseded.add(current.executorInstanceId);
-      // Bounded memory: only recent instances matter for rejecting late writes.
-      if (this.superseded.size > 64) this.superseded.delete(this.superseded.values().next().value as ExecutorInstanceId);
-    }
+    const conflict = this.current ? nowConflictFor(this.current, projection) : null;
+    if (conflict) throw new NowConflictError(conflict);
     this.current = projection;
     for (const listener of this.listeners) listener(projection);
     return projection;

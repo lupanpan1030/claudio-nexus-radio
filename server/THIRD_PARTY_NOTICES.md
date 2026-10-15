@@ -9,15 +9,19 @@ root notice will be assembled later; this one is scoped to `server/`.
 - Fixed source: commit `ee26f6cc29ec904b9608de35c4b9c078b23df94a`
 - Adapted into `server/application/narration/intro-window.ts` (rewritten in TypeScript, not copied verbatim):
   - `music_assistant/providers/ai_radio/post_window.py` — `is_sung` / `lyric_onset`
-    (section-marker list, symbol-only filler, bracketed-marker handling, earliest sung timed line).
+    (section-marker list, symbol-only filler, bracketed-marker handling, earliest sung timed line),
+    used here only as `lyricOnsetHintMs`, a hint that does not by itself enable any overlap.
   - `music_assistant/providers/ai_radio/rendering.py` (`_plan_post_over`) and
     `music_assistant/providers/ai_radio/constants.py` — overlap = min(vocal onset − ramp, clip − head),
     minimum overlap 1.5 s, minimum voice head 1.0 s.
   - `music_assistant/controllers/streams/constants.py` — `VOICE_OVER_RAMP` 0.4 s.
-- Changes: Chinese credit-line and section-marker handling; input is the shared
-  `LyricsAsset` contract (only `native-line`/`native-word` timing accepted,
-  `offsetMs` applied); explicit "unavailable" reasons; a measured voice
-  duration is required (no estimate).
+- Changes: Chinese credit-line and section-marker handling; the hint reads the
+  shared `LyricsAsset` contract (only `native-line`/`native-word` timing,
+  `offsetMs` applied); unlike upstream, the overlap budget does not take the
+  lyric onset as the vocal entry — it requires an explicit manual or verified
+  window for the exact source revision; explicit "unavailable" reasons; a
+  measured voice duration is required (no estimate). The helper is not yet
+  called by preparation, narration or the playback core.
 - Upstream NOTICE: the Music Assistant NOTICE file describes official-build
   service credentials (`app_secrets.json`) and bundled third-party models
   (e.g. Beat This!, SKey, FireRedVAD). None of those parts are used or
@@ -29,7 +33,7 @@ root notice will be assembled later; this one is scoped to `server/`.
   `controller/package.json` declares MIT)
 - Fixed source: commit `b5d1c4c159d5146239a9a933d36397a681fd1039`
 - Adapted into `server/application/narration/intro-window.ts`:
-  - `controller/src/broadcast/vocal-runway.ts` — `VOCAL_RUNWAY_FLOOR_MS` (2.5 s): a measured vocal
+  - `controller/src/broadcast/vocal-runway.ts` — `VOCAL_RUNWAY_FLOOR_MS` (2.5 s): a trusted vocal
     onset earlier than the floor refuses talk-over; unknown onsets stay unknown.
   - Reviewed but deliberately not adopted: `controller/src/llm/internal/prompts/intro-budget.ts`
     words-per-second trimming (whitespace word counts do not fit unspaced Chinese, and the plan

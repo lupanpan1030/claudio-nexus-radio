@@ -36,6 +36,9 @@ export interface FakeTrack {
 export class FakeProvider implements CatalogPort, MediaSourcePort, LyricsSourcePort {
   readonly tracks = new Map<string, FakeTrack>();
   resolveCalls = 0;
+  openCalls = 0;
+  /** When set, open() waits for this gate before answering (a slow upstream). */
+  openGate: Promise<void> | null = null;
 
   constructor(readonly providerId: ProviderId) {}
 
@@ -97,6 +100,8 @@ export class FakeProvider implements CatalogPort, MediaSourcePort, LyricsSourceP
   }
 
   async open(binding: SourceBinding, request: StreamRequest): Promise<MediaStream> {
+    this.openCalls += 1;
+    if (this.openGate) await raceAbort(this.openGate, request.signal);
     const track = this.tracks.get(String(binding.mediaId));
     const hash = track ? createHash("sha256").update(track.bytes).digest("hex") : "";
     // Same bytes or nothing: never substitute another recording.

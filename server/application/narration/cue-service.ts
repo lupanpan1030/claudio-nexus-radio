@@ -15,7 +15,8 @@ import {
 import type { ScriptWriterPort } from "../../ports/narration.js";
 import type { ProviderRegistry } from "../../ports/providers.js";
 import type { Clock, IdSource } from "../../ports/runtime.js";
-import type { CueRecord, CueStore, ScriptStore } from "../../ports/stores.js";
+import type { CatalogEntry } from "../../ports/catalog.js";
+import type { CueRecord, CueStore, ScriptStore, StartedStore } from "../../ports/stores.js";
 import { OperationAbort, appError, throwIfAborted } from "../errors.js";
 import { raceAbort, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
@@ -37,6 +38,10 @@ export interface CueStart {
   readonly to: CueEndpoint;
 }
 
+/** How much listening history and recent wording a script writer is given. */
+const RECENT_STARTED = 8;
+const RECENT_GENERATED = 6;
+
 interface CueJob {
   readonly controller: AbortController;
   record: CueRecord;
@@ -57,6 +62,7 @@ export class CueService {
     private readonly deps: {
       readonly store: CueStore;
       readonly scripts: ScriptStore;
+      readonly started: StartedStore;
       readonly writer: ScriptWriterPort;
       readonly voices: VoiceService;
       readonly providers: ProviderRegistry;
@@ -189,9 +195,13 @@ export class CueService {
       const to = providers.describe(record.toTrack);
       if (!to) throw appError("unavailable", "track_not_found", "next track is not in the catalog");
       const from = providers.describe(record.fromTrack);
+      const recentGenerated = scripts.recent(RECENT_GENERATED).map((entry) => entry.text);
       const scoped = withDeadline(signal, policy.scriptDeadlineMs);
       try {
-        const written = await raceAbort(writer.write({ to, from, signal: scoped.signal }), scoped.signal);
+        const written = await raceAbort(
+          writer.write({ to, from, recentStarted: this.recentStarted(), recentGenerated, signal: scoped.signal }),
+          scoped.signal
+        );
         throwIfAborted(scoped.signal);
         const text = written.text.trim().slice(0, 4000);
         if (!text) throw appError("unavailable", "script_empty", "script writer returned no text");
@@ -223,6 +233,21 @@ export class CueService {
     } catch (error) {
       this.publish(job, (current) => ({ ...current, voice: advance(current.voice, settledFromError(error, signal)) }));
     }
+  }
+
+  /** Distinct catalog entries of recent started facts, newest first; entries no longer in a catalog are skipped. */
+  private recentStarted(): CatalogEntry[] {
+    const seen = new Set<string>();
+    const entries: CatalogEntry[] = [];
+    for (const fact of this.deps.started.recent(RECENT_STARTED * 3)) {
+      const key = `${fact.track.providerId}\n${fact.track.mediaId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const entry = this.deps.providers.describe(fact.track);
+      if (entry) entries.push(entry);
+      if (entries.length >= RECENT_STARTED) break;
+    }
+    return entries;
   }
 
   /**

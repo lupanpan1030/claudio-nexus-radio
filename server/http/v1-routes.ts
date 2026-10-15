@@ -5,6 +5,7 @@ import {
   decode,
   lyricsRequestV1Decoder,
   narrationRequestV1Decoder,
+  NOW_CONFLICT_HTTP_STATUS,
   nowProjectionV1Decoder,
   prepareRequestV1Decoder,
   PROTOCOL_VERSION,
@@ -20,7 +21,7 @@ import { appError } from "../application/errors.js";
 import type { StartedService } from "../application/history/started-service.js";
 import type { LyricsService } from "../application/lyrics/lyrics-service.js";
 import type { CueService } from "../application/narration/cue-service.js";
-import type { NowService } from "../application/now/now-service.js";
+import { NowConflictError, type NowService } from "../application/now/now-service.js";
 import type { PlaybackPolicy } from "../application/policy.js";
 import type { PreparationService } from "../application/preparation/preparation-service.js";
 import type { SourceResolver, StreamAccess } from "../application/sources.js";
@@ -119,10 +120,7 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
     const request = body(req, res, resolveRequestV1Decoder);
     if (!request) return;
     try {
-      const preparation = request.preparationId ? preparations.get(request.preparationId) : null;
-      if (request.preparationId && (!preparation || preparation.itemId !== request.itemId)) {
-        throw appError("invalid", "preparation_mismatch", "preparationId does not belong to this item");
-      }
+      if (request.preparationId) preparations.checkRefreshTarget(request.preparationId, request.itemId, request.track);
       const resolution = await sources.resolve(
         {
           itemId: request.itemId,
@@ -204,6 +202,8 @@ export function createV1Router(services: PlaybackServices, mode: "v1" | "legacy"
     try {
       res.json(now.accept(projection));
     } catch (error) {
+      // The shared 409 body names the accepted owner; it is an error, never a snapshot.
+      if (error instanceof NowConflictError) return void res.status(NOW_CONFLICT_HTTP_STATUS).json(error.conflict);
       sendError(res, error);
     }
   });

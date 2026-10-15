@@ -14,6 +14,8 @@ export async function generateModelFirstDjLine(input: {
   query?: string;
   reason?: string;
   contextProfile?: "full" | "minimal";
+  /** Formatted hand-over block for the minimal DJ context. */
+  handoverContext?: string;
   signal?: AbortSignal;
 }) {
   const contextProfile = input.contextProfile ?? "minimal";
@@ -35,7 +37,8 @@ export async function generateModelFirstDjLine(input: {
     includeTasteSignals: false,
     includeRecentPlays: false,
     minimalDjContext: contextProfile === "minimal",
-    djFewShotContent: fewShotSelection.content
+    djFewShotContent: fewShotSelection.content,
+    djHandoverContext: input.handoverContext
   });
   const decision = await resolveClaudeDecision({
     context,

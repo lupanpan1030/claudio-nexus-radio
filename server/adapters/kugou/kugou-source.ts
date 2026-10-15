@@ -17,60 +17,139 @@ export interface KuGouSearchHit {
   readonly hash?: string;
 }
 
+/** Which URL request produced a binding: the two /song/url qualities are different files. */
+export type KuGouVariant = "q320" | "q128" | "new";
+
 interface KuGouBinding {
-  /** The hash this catalog entry resolved to (the recording). */
+  /** The hash this catalog entry resolved to (what refreshes request again). */
   readonly hash: string;
-  readonly url: string;
+  /** Hash the URL response itself reported for the served file; null when it reported none. */
+  readonly servedHash: string | null;
+  /** Null only in bindings written before variants were recorded. */
+  readonly variant: KuGouVariant | null;
   readonly confidence: RecordingConfidence;
-  readonly accountRevision: string | null;
   readonly fetchedAt: number;
+  /** Absent once scrubbed: signed URL and account tag are short-lived private data. */
+  readonly url?: string;
+  readonly accountRevision?: string | null;
+  readonly scrubbed?: true;
 }
 
 function readBinding(binding: SourceBinding): KuGouBinding {
-  if (typeof binding.hash !== "string" || !HASH.test(binding.hash) || typeof binding.url !== "string") {
+  const { hash, url, servedHash, variant, scrubbed } = binding;
+  if (typeof hash !== "string" || !HASH.test(hash)) throw appError("invalid", "kugou_binding_corrupt");
+  if (scrubbed !== true && typeof url !== "string") throw appError("invalid", "kugou_binding_corrupt");
+  if (servedHash !== undefined && servedHash !== null && (typeof servedHash !== "string" || !HASH.test(servedHash))) {
     throw appError("invalid", "kugou_binding_corrupt");
   }
-  return binding as unknown as KuGouBinding;
+  return {
+    ...(binding as unknown as KuGouBinding),
+    servedHash: typeof servedHash === "string" ? servedHash.toUpperCase() : null,
+    variant: variant === "q320" || variant === "q128" || variant === "new" ? variant : null
+  };
 }
 
-/** First http(s) audio-looking URL from the url/backup fields (deep), as the legacy resolver did. */
-export function extractAudioUrl(value: unknown, depth = 0): string {
-  if (!value || depth > 6) return "";
-  if (typeof value === "string") {
-    const match = /https?:\/\/[^\s"'<>]+/i.exec(value)?.[0] ?? "";
-    return match && !/\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(match) ? match : "";
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = extractAudioUrl(item, depth + 1);
-      if (found) return found;
-    }
-    return "";
-  }
-  if (typeof value !== "object") return "";
-  const record = value as Record<string, unknown>;
-  for (const key of ["url", "backupUrl", "backup_url", "play_url", "playUrl", "audio_url"]) {
-    const found = extractAudioUrl(record[key], depth + 1);
-    if (found) return found;
-  }
-  for (const child of Object.values(record)) {
-    if (child && typeof child === "object") {
-      const found = extractAudioUrl(child, depth + 1);
-      if (found) return found;
+const URL_KEYS = ["url", "backupUrl", "backup_url", "play_url", "playUrl", "audio_url"] as const;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function httpAudioUrl(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const match = /^https?:\/\/[^\s"'<>]+$/i.exec(value.trim())?.[0] ?? "";
+  return match && !/\.(jpg|jpeg|png|webp|gif)($|\?)/i.test(match) ? match : "";
+}
+
+/** First http(s) URL under one entry's own known URL keys (a string or a list of strings); no deeper search. */
+function entryUrl(entry: Record<string, unknown>): string {
+  for (const key of URL_KEYS) {
+    const value = entry[key];
+    for (const candidate of Array.isArray(value) ? value : [value]) {
+      const url = httpAudioUrl(candidate);
+      if (url) return url;
     }
   }
   return "";
 }
 
+function entryHash(entry: Record<string, unknown> | null): string | null {
+  const value = entry?.hash;
+  return typeof value === "string" && HASH.test(value) ? value.toUpperCase() : null;
+}
+
 /**
- * KuGou playback. The recording is the resolved hash; the revision is that
- * hash scoped to the catalog ref. A refresh re-requests a URL for the bound
- * hash only (never a new search), so a new signed URL keeps the revision and
- * a different hash is a new revision. The bundled KuGouMusicApi /song/url
- * passes the tracker body through without a documented file-hash or length
- * field, so neither is read: duration stays unknown. Streams are proxied
- * with the caller's Range and never fall back to another recording or to a
- * local file.
+ * A URL together with the hash reported *in the same entry*. `flat` entries
+ * are the top-level body and `data` object (the shape the legacy client read
+ * from /song/url): a data-level URL may take the top-level hash. `listed`
+ * entries are objects inside a `data` array or an array directly under
+ * `data`; they only ever carry their own hash. Nothing deeper is searched:
+ * an unknown nesting is not evidence of what file a URL serves.
+ */
+export interface KuGouUrlEntry {
+  readonly url: string;
+  readonly hash: string | null;
+  readonly listed: boolean;
+}
+
+export function kugouUrlEntries(body: unknown): KuGouUrlEntry[] {
+  const top = asRecord(body);
+  if (!top) return [];
+  const entries: KuGouUrlEntry[] = [];
+  const add = (entry: Record<string, unknown>, hash: string | null, listed: boolean) => {
+    const url = entryUrl(entry);
+    if (url) entries.push({ url, hash, listed });
+  };
+  add(top, entryHash(top), false);
+  const data = top.data;
+  const dataRecord = asRecord(data);
+  if (dataRecord) add(dataRecord, entryHash(dataRecord) ?? entryHash(top), false);
+  const lists = Array.isArray(data) ? [data] : dataRecord ? Object.values(dataRecord).filter(Array.isArray) : [];
+  for (const list of lists) {
+    for (const item of list as unknown[]) {
+      const record = asRecord(item);
+      if (record) add(record, entryHash(record), true);
+    }
+  }
+  return entries;
+}
+
+/**
+ * Picks the served URL for a requested hash, or null. /song/url addresses
+ * the file by the requested hash, so a flat URL without a reported hash
+ * keeps that hash as its evidence; /song/url/new has no live sample and
+ * returns several qualities at once, so only entries that carry their own
+ * hash are accepted. Either way an entry reporting the requested hash is
+ * preferred, and one reporting another hash is a different file.
+ */
+export function pickServedUrl(body: unknown, requestedHash: string, variant: KuGouVariant): { url: string; servedHash: string | null } | null {
+  const wanted = requestedHash.toUpperCase();
+  const entries = kugouUrlEntries(body).filter((entry) => entry.hash !== null || (variant !== "new" && !entry.listed));
+  const chosen =
+    entries.find((entry) => entry.hash === wanted) ??
+    entries.find((entry) => entry.hash === null) ??
+    entries.find((entry) => entry.hash !== null);
+  return chosen ? { url: chosen.url, servedHash: chosen.hash } : null;
+}
+
+const URL_REQUESTS: readonly { readonly variant: KuGouVariant; readonly pathname: string; readonly quality?: number }[] = [
+  { variant: "q320", pathname: "/song/url", quality: 320 },
+  { variant: "q128", pathname: "/song/url", quality: 128 },
+  { variant: "new", pathname: "/song/url/new" }
+];
+
+/**
+ * KuGou playback. The recording is the file the URL response vouches for:
+ * the requested hash, or the different hash the response reported for the
+ * same entry. The revision is scoped to the catalog ref and names the
+ * requested hash, the served hash and the URL variant, so a refresh keeps it
+ * only when the same request yields the same file again: a new signed URL
+ * for the same file keeps it; another reported hash or a fallback to another
+ * quality is a new revision, and nothing bound to the old one (lyric clock,
+ * position) carries over. Refreshes never search; they ask for the bound
+ * hash, starting with the bound variant. Duration stays unknown (no
+ * documented unit). Streams are proxied with the caller's Range and never
+ * fall back to another recording or to a local file.
  */
 export class KuGouMediaSource implements MediaSourcePort {
   constructor(
@@ -92,24 +171,39 @@ export class KuGouMediaSource implements MediaSourcePort {
 
     const previous = context.previous ? readBinding(context.previous.binding) : null;
     const target = previous ? { hash: previous.hash, confidence: previous.confidence } : await this.locate(row, context.signal);
-    const url = await this.fetchUrl(target.hash, context.signal);
-    const recordingHash = target.hash.toUpperCase();
+    const requestedHash = target.hash.toUpperCase();
+    const served = await this.fetchUrl(requestedHash, previous?.variant ?? null, context.signal);
+    const recordingHash = served.servedHash ?? requestedHash;
     const now = this.deps.clock.now();
     const binding: KuGouBinding = {
-      hash: recordingHash,
-      url,
+      hash: requestedHash,
+      servedHash: served.servedHash,
+      variant: served.variant,
       confidence: target.confidence,
-      accountRevision: this.deps.client.accountRevision(),
-      fetchedAt: now
+      fetchedAt: now,
+      url: served.url,
+      accountRevision: this.deps.client.accountRevision()
     };
     return {
       recording: { recordingId: asId<RecordingId>(`kugou:${recordingHash}`), confidence: target.confidence },
-      sourceRevision: refScopedRevision("kg-", ref, [recordingHash]),
+      sourceRevision: refScopedRevision("kg-", ref, [requestedHash, recordingHash, served.variant]),
       duration: { kind: "unknown" },
       capabilities: { seekable: true, rangeRequests: true },
       expiresAt: now + this.deps.urlTtlMs,
       binding: binding as unknown as SourceBinding
     };
+  }
+
+  /** Earlier answers stop holding when the signed-in account changes. */
+  playabilityScope(): string {
+    return this.deps.client.accountRevision() ?? "signed-out";
+  }
+
+  scrubBinding(raw: SourceBinding): SourceBinding | null {
+    const binding = readBinding(raw);
+    if (binding.scrubbed) return null;
+    const { url: _url, accountRevision: _account, ...kept } = binding;
+    return { ...kept, scrubbed: true } as unknown as SourceBinding;
   }
 
   private async locate(row: TrackRow, signal: AbortSignal): Promise<{ hash: string; confidence: RecordingConfidence }> {
@@ -127,21 +221,23 @@ export class KuGouMediaSource implements MediaSourcePort {
     return { hash: best.hit.hash!, confidence: "unverified" };
   }
 
-  private async fetchUrl(hash: string, signal: AbortSignal): Promise<string> {
-    const requests = [
-      { pathname: "/song/url", params: { hash, quality: 320 } },
-      { pathname: "/song/url", params: { hash, quality: 128 } },
-      { pathname: "/song/url/new", params: { hash } }
-    ];
+  private async fetchUrl(
+    hash: string,
+    preferred: KuGouVariant | null,
+    signal: AbortSignal
+  ): Promise<{ url: string; servedHash: string | null; variant: KuGouVariant }> {
+    // A refresh asks the bound variant first, so an ordinary URL renewal can keep the revision.
+    const requests = preferred ? [...URL_REQUESTS].sort((a, b) => Number(b.variant === preferred) - Number(a.variant === preferred)) : URL_REQUESTS;
     const authModes = this.deps.client.hasCredentials() ? [true, false] : [false];
     let lastError: unknown = appError("unavailable", "kugou_no_url", "KuGou returned no playable URL");
     for (const request of requests) {
       for (const auth of authModes) {
         throwIfAborted(signal);
         try {
-          const body = await this.deps.client.get(request.pathname, request.params, { auth, signal });
-          const url = extractAudioUrl(body);
-          if (url) return url;
+          const params = request.quality === undefined ? { hash } : { hash, quality: request.quality };
+          const body = await this.deps.client.get(request.pathname, params, { auth, signal });
+          const served = pickServedUrl(body, hash, request.variant);
+          if (served) return { ...served, variant: request.variant };
         } catch (error) {
           if (isAbort(error) || signal.aborted) throw error;
           lastError = error;
@@ -153,7 +249,9 @@ export class KuGouMediaSource implements MediaSourcePort {
 
   async open(raw: SourceBinding, request: StreamRequest): Promise<MediaStream> {
     const binding = readBinding(raw);
-    if (binding.accountRevision !== null && binding.accountRevision !== this.deps.client.accountRevision()) {
+    if (binding.scrubbed || !binding.url) throw appError("expired", "kugou_url_scrubbed", "the signed URL was discarded; resolve again");
+    const account = binding.accountRevision ?? null;
+    if (account !== null && account !== this.deps.client.accountRevision()) {
       throw appError("auth-required", "kugou_account_changed", "the KuGou account changed; resolve again");
     }
     const doFetch = this.deps.fetch ?? fetch;
@@ -189,8 +287,8 @@ export class KuGouMediaSource implements MediaSourcePort {
 
 /**
  * Lyrics through the bundled KuGouMusicApi /search/lyric → /lyric chain,
- * keyed only by the bound recording hash (never by title or a served-file
- * hash). Checked against upstream KuGouMusicApi 06560e3e: /lyric?decode=true
+ * keyed only by the hash of the file the binding serves (the reported served
+ * hash, else the requested one) — never by title. Checked against upstream KuGouMusicApi 06560e3e: /lyric?decode=true
  * adds `decodeContent`, which is KRC only when the document's `contenttype`
  * is 0 and otherwise the base64-decoded text regardless of the requested
  * fmt — so the format is taken from the content and the document must
@@ -203,7 +301,7 @@ export class KuGouLyrics implements LyricsSourcePort {
 
   async fetch(lookup: LyricsLookup, options: { readonly signal: AbortSignal }): Promise<RawLyrics> {
     const binding = readBinding(lookup.binding);
-    const searched = await this.client.get("/search/lyric", { hash: binding.hash, man: "no" }, { auth: false, signal: options.signal });
+    const searched = await this.client.get("/search/lyric", { hash: binding.servedHash ?? binding.hash, man: "no" }, { auth: false, signal: options.signal });
     const candidate = candidateList(searched).find((item) => item.id && item.accesskey);
     if (!candidate) return { kind: "missing", reason: "not-found" };
     for (const fmt of ["krc", "lrc"] as const) {

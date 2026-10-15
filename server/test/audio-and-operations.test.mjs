@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { probeAudioDuration } from "../adapters/audio/duration.ts";
+import { probeAudioDuration, probeAudioFileDuration } from "../adapters/audio/duration.ts";
 import { OperationAbort, abortKind } from "../application/errors.ts";
 import { SharedFlight, withDeadline } from "../application/operations.ts";
 import { makeWav } from "../testing/wav.ts";
@@ -35,6 +35,47 @@ test("MP3 duration counts real frames (ID3 skipped); garbage stays unknown", () 
   assert.deepEqual(probeAudioDuration(makeMp3(100, { id3: true }), "mp3"), { kind: "known", ms: expected, source: "container-metadata" });
   assert.deepEqual(probeAudioDuration(new Uint8Array(4096).fill(7), "mp3"), { kind: "unknown" });
   assert.deepEqual(probeAudioDuration(makeWav(500), "m4a"), { kind: "unknown" });
+});
+
+/** In-memory file reader that records how many bytes the probe actually read. */
+function reader(bytes) {
+  const state = { read: 0, calls: 0 };
+  return {
+    state,
+    file: {
+      size: bytes.length,
+      async readAt(position, length) {
+        state.calls += 1;
+        const slice = bytes.subarray(position, Math.min(bytes.length, position + length));
+        state.read += slice.length;
+        return slice;
+      }
+    }
+  };
+}
+
+test("whole-file duration is read from bounded header/tail windows, never the whole file", async () => {
+  // 30 s of 8 kHz PCM is ~480 KB: larger than the head window.
+  const wav = reader(makeWav(30_000));
+  assert.deepEqual(await probeAudioFileDuration(wav.file, "wav"), { kind: "known", ms: 30_000, source: "container-metadata" });
+  assert.ok(wav.state.read <= 256 * 1024, "only the header window was read");
+
+  // A large CBR MP3 without a Xing/VBRI count: the frames beyond the window are not counted, so the length is unknown.
+  const mp3 = reader(makeMp3(1500));
+  assert.ok(mp3.file.size > 256 * 1024);
+  assert.deepEqual(await probeAudioFileDuration(mp3.file, "mp3"), { kind: "unknown" });
+  assert.ok(mp3.state.read <= 256 * 1024 + 64 * 1024);
+
+  // Small files are complete in the head read and measured as before.
+  const small = reader(makeMp3(100));
+  assert.deepEqual(await probeAudioFileDuration(small.file, "mp3"), probeAudioDuration(makeMp3(100), "mp3"));
+
+  // A WAV header that claims more data than the file holds is bounded by the real size, not trusted.
+  const truncated = makeWav(30_000).slice(0, 300 * 1024);
+  const cut = reader(truncated);
+  const measured = await probeAudioFileDuration(cut.file, "wav");
+  assert.equal(measured.kind, "known");
+  assert.ok(measured.ms < 30_000 && measured.ms === Math.round(((truncated.length - 44) / 16_000) * 1000));
 });
 
 test("deadline aborts are classified as timed-out, parent aborts as cancelled", async () => {

@@ -29,7 +29,7 @@ test("migrating an old-shape database twice is additive and idempotent", () => {
     INSERT INTO tracks VALUES ('legacy-1', 'T', 'A', 'B', '/music/a.mp3', 'x', 'mp3', 1, '2026-01-01T00:00:00.000Z');
     INSERT INTO plays (track_id, played_at, reason, dj_line) VALUES ('legacy-1', '2026-01-02T00:00:00.000Z', 'old', 'line');
   `);
-  assert.deepEqual(runMigrations(db), [1, 2, 3]);
+  assert.deepEqual(runMigrations(db), [1, 2, 3, 4]);
   assert.deepEqual(runMigrations(db), [], "second run applies nothing");
   assert.equal(schemaVersion(db), CURRENT_SCHEMA_VERSION);
   assert.ok(columns(db, "tracks").includes("source"));
@@ -59,7 +59,7 @@ test("a failing migration rolls back completely and records no version", () => {
   assert.equal(tables(db).includes("half_done"), false);
   assert.equal(columns(db, "plays").includes("semantics"), false);
   // The real migration still applies afterwards.
-  assert.deepEqual(runMigrations(db), [2, 3]);
+  assert.deepEqual(runMigrations(db), [2, 3, 4]);
   db.close();
 });
 
@@ -67,10 +67,41 @@ test("lyrics cached before the parser version existed stay but are marked as ver
   const db = new DatabaseSync(":memory:");
   runMigrations(db, MIGRATIONS.filter((migration) => migration.version <= 2));
   db.prepare("INSERT INTO lyrics_assets (source_revision, availability_json, created_at) VALUES ('rev-old', '{}', 1)").run();
-  assert.deepEqual(runMigrations(db), [3]);
+  assert.deepEqual(runMigrations(db, MIGRATIONS.filter((migration) => migration.version <= 3)), [3]);
   assert.deepEqual(db.prepare("SELECT source_revision, availability_json, parser_version FROM lyrics_assets").all().map((row) => ({ ...row })), [
     { source_revision: "rev-old", availability_json: "{}", parser_version: 0 }
   ]);
+  db.close();
+});
+
+test("v4 adds identity, activation and scrub columns as NULLs; old rows keep their meaning; a failing v4 rolls back", () => {
+  const db = new DatabaseSync(path.join(dir, "v3.sqlite"));
+  runMigrations(db, MIGRATIONS.filter((migration) => migration.version <= 3));
+  db.prepare("INSERT INTO local_content_fingerprints (file_path, size, mtime_ms, sha256, duration_json, computed_at) VALUES ('/m/a.wav', 9, 5, 'abc', '{}', 1)").run();
+  db.prepare("INSERT INTO playback_stream_handles (token, kind, provider_id, source_revision, binding_json, expires_at, retain_until, created_at) VALUES ('t', 'media', 'p', 'r', '{}', 10, 20, 1)").run();
+  db.prepare(`INSERT INTO playback_resolved_sources (source_revision, provider_id, media_id, track_id, recording_id, confidence, duration_json, binding_json, first_seen_at, last_seen_at)
+    VALUES ('r', 'p', 'm', NULL, 'rec', 'content-hash', '{}', '{"hash":"h"}', 1, 2)`).run();
+  const before = (sql) => db.prepare(sql).all().map((row) => ({ ...row }));
+  const snapshot = () => ({
+    fingerprints: before("SELECT * FROM local_content_fingerprints"),
+    handles: before("SELECT * FROM playback_stream_handles"),
+    sources: before("SELECT * FROM playback_resolved_sources")
+  });
+  const v3 = snapshot();
+
+  const failing = { version: 4, name: "half-v4", up(target) { MIGRATIONS.find((m) => m.version === 4).up(target); throw new Error("boom"); } };
+  assert.throws(() => runMigrations(db, [...MIGRATIONS.filter((m) => m.version <= 3), failing]), /migration 4 \(half-v4\) failed: boom/);
+  assert.equal(schemaVersion(db), 3);
+  assert.deepEqual(snapshot(), v3, "a failed v4 leaves the v3 shape and rows untouched");
+  assert.equal(columns(db, "playback_stream_handles").includes("first_opened_at"), false);
+
+  assert.deepEqual(runMigrations(db), [4]);
+  assert.deepEqual(runMigrations(db), [], "second run applies nothing");
+  for (const column of ["dev", "ino", "mtime_ns", "ctime_ns"]) assert.ok(columns(db, "local_content_fingerprints").includes(column));
+  const after = snapshot();
+  assert.deepEqual(after.fingerprints, [{ ...v3.fingerprints[0], dev: null, ino: null, mtime_ns: null, ctime_ns: null }], "an old fingerprint has no identity and so never matches");
+  assert.deepEqual(after.handles, [{ ...v3.handles[0], first_opened_at: null }]);
+  assert.deepEqual(after.sources, [{ ...v3.sources[0], expires_at: null, binding_scrubbed_at: null }], "identity rows are kept as they were");
   db.close();
 });
 

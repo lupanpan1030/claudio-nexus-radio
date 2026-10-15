@@ -29,6 +29,7 @@ export async function pipeMediaStream(open: (signal: AbortSignal) => Promise<Med
   for (const [name, value] of Object.entries(stream.headers)) res.setHeader(name, value);
   res.setHeader("Cache-Control", "no-store");
   if (!stream.body || req.method === "HEAD") {
+    releaseBody(stream.body);
     res.end();
     return;
   }
@@ -38,4 +39,11 @@ export async function pipeMediaStream(open: (signal: AbortSignal) => Promise<Med
     // Client went away or upstream broke mid-body; the connection is already closed.
     if (!res.destroyed) res.destroy();
   }
+}
+
+/** A body that will never be read still holds its file or connection; let it go. */
+function releaseBody(body: MediaStream["body"]): void {
+  if (!body) return;
+  if (body instanceof Readable) body.destroy();
+  else void (body as { return?: () => unknown }).return?.();
 }

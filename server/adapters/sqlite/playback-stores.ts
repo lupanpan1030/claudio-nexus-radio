@@ -230,6 +230,11 @@ export class SqliteScriptStore implements ScriptStore {
       .prepare("INSERT INTO narration_scripts (asset_id, cue_id, version, text, writer, created_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(entry.script.assetId, entry.cueId, entry.script.version, entry.script.text, entry.writer, entry.createdAt);
   }
+
+  recent(limit: number): readonly { text: string; writer: string; createdAt: number }[] {
+    const rows = this.db.prepare("SELECT text, writer, created_at FROM narration_scripts ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit) as Row[];
+    return rows.map((row) => ({ text: String(row.text), writer: String(row.writer), createdAt: Number(row.created_at) }));
+  }
 }
 
 export class SqliteVoiceCacheStore implements VoiceCacheStore {
@@ -279,7 +284,7 @@ function toVoice(row: Row): VoiceCacheEntry {
 export class SqliteStreamHandleStore implements StreamHandleStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(record: StreamHandleRecord): void {
+  insert(record: Omit<StreamHandleRecord, "firstOpenedAt">): void {
     this.db
       .prepare(
         `INSERT INTO playback_stream_handles (token, kind, provider_id, source_revision, binding_json, expires_at, retain_until, created_at)
@@ -299,8 +304,20 @@ export class SqliteStreamHandleStore implements StreamHandleStore {
       binding: parse<SourceBinding>(row.binding_json),
       expiresAt: row.expires_at === null ? null : Number(row.expires_at),
       retainUntil: Number(row.retain_until),
-      createdAt: Number(row.created_at)
+      createdAt: Number(row.created_at),
+      firstOpenedAt: row.first_opened_at === null || row.first_opened_at === undefined ? null : Number(row.first_opened_at)
     };
+  }
+
+  markOpened(token: string, admittedAt: number): void {
+    this.db.prepare("UPDATE playback_stream_handles SET first_opened_at = ? WHERE token = ? AND first_opened_at IS NULL").run(admittedAt, token);
+  }
+
+  retainedRevisions(now: number): ReadonlySet<string> {
+    const rows = this.db
+      .prepare("SELECT DISTINCT source_revision FROM playback_stream_handles WHERE kind = 'media' AND source_revision IS NOT NULL AND retain_until >= ?")
+      .all(now) as Row[];
+    return new Set(rows.map((row) => String(row.source_revision)));
   }
 
   revokeWhere(providerId: ProviderId, predicate: (binding: SourceBinding) => boolean): number {
@@ -329,13 +346,14 @@ export class SqliteStreamHandleStore implements StreamHandleStore {
 export class SqliteResolvedSourceStore implements ResolvedSourceStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  upsert(record: ResolvedSourceRecord): void {
+  upsert(record: Omit<ResolvedSourceRecord, "bindingScrubbedAt">): void {
     this.db
       .prepare(
         `INSERT INTO playback_resolved_sources (source_revision, provider_id, media_id, track_id, recording_id, confidence,
-           duration_json, binding_json, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           duration_json, binding_json, first_seen_at, last_seen_at, expires_at, binding_scrubbed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
          ON CONFLICT(source_revision) DO UPDATE SET binding_json = excluded.binding_json,
-           duration_json = excluded.duration_json, last_seen_at = excluded.last_seen_at`
+           duration_json = excluded.duration_json, last_seen_at = excluded.last_seen_at,
+           expires_at = excluded.expires_at, binding_scrubbed_at = NULL`
       )
       .run(
         record.sourceRevision,
@@ -347,25 +365,52 @@ export class SqliteResolvedSourceStore implements ResolvedSourceStore {
         json(record.duration),
         json(record.binding),
         record.firstSeenAt,
-        record.lastSeenAt
+        record.lastSeenAt,
+        record.expiresAt
       );
   }
 
   get(sourceRevision: SourceRevision): ResolvedSourceRecord | null {
     const row = this.db.prepare("SELECT * FROM playback_resolved_sources WHERE source_revision = ?").get(sourceRevision) as Row | undefined;
-    if (!row) return null;
-    return {
-      sourceRevision: asId<SourceRevision>(String(row.source_revision)),
-      track: ref(row.provider_id, row.media_id),
-      legacyTrackId: row.track_id ? String(row.track_id) : null,
-      recordingId: asId<RecordingId>(String(row.recording_id)),
-      confidence: String(row.confidence) as RecordingConfidence,
-      duration: parse<DurationInfo>(row.duration_json),
-      binding: parse<SourceBinding>(row.binding_json),
-      firstSeenAt: Number(row.first_seen_at),
-      lastSeenAt: Number(row.last_seen_at)
-    };
+    return row ? toResolvedSource(row) : null;
   }
+
+  listScrubbable(before: number, fallbackTtlMs: number, limit: number): readonly ResolvedSourceRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM playback_resolved_sources
+         WHERE binding_scrubbed_at IS NULL AND COALESCE(expires_at, last_seen_at + ?) < ?
+         ORDER BY last_seen_at LIMIT ?`
+      )
+      .all(fallbackTtlMs, before, limit) as Row[];
+    return rows.map(toResolvedSource);
+  }
+
+  markScrubbed(sourceRevision: SourceRevision, expectedLastSeenAt: number, binding: SourceBinding, at: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE playback_resolved_sources SET binding_json = ?, binding_scrubbed_at = ?
+         WHERE source_revision = ? AND last_seen_at = ? AND binding_scrubbed_at IS NULL`
+      )
+      .run(json(binding), at, sourceRevision, expectedLastSeenAt);
+    return Number(result.changes) === 1;
+  }
+}
+
+function toResolvedSource(row: Row): ResolvedSourceRecord {
+  return {
+    sourceRevision: asId<SourceRevision>(String(row.source_revision)),
+    track: ref(row.provider_id, row.media_id),
+    legacyTrackId: row.track_id ? String(row.track_id) : null,
+    recordingId: asId<RecordingId>(String(row.recording_id)),
+    confidence: String(row.confidence) as RecordingConfidence,
+    duration: parse<DurationInfo>(row.duration_json),
+    binding: parse<SourceBinding>(row.binding_json),
+    firstSeenAt: Number(row.first_seen_at),
+    lastSeenAt: Number(row.last_seen_at),
+    expiresAt: row.expires_at === null || row.expires_at === undefined ? null : Number(row.expires_at),
+    bindingScrubbedAt: row.binding_scrubbed_at === null || row.binding_scrubbed_at === undefined ? null : Number(row.binding_scrubbed_at)
+  };
 }
 
 export class SqliteLyricsAssetStore implements LyricsAssetStore {
@@ -465,6 +510,19 @@ export class SqliteReservationStore implements ReservationStore {
          VALUES (?, ?, ?, ?, 'reserved', ?, ?)`
       )
       .run(entry.itemId, entry.preparationId, entry.track.providerId, entry.track.mediaId, entry.at, entry.until);
+  }
+
+  tryReserve(entry: { itemId: QueueItemId; preparationId: PreparationId; track: TrackRef; until: number; at: number }): boolean {
+    // node:sqlite is synchronous and the process single-threaded: no other request runs between this check and the insert.
+    const held = this.db
+      .prepare(
+        `SELECT 1 FROM playback_candidate_reservations
+         WHERE provider_id = ? AND media_id = ? AND until > ? AND (item_id IS NULL OR item_id != ?) LIMIT 1`
+      )
+      .get(entry.track.providerId, entry.track.mediaId, entry.at, entry.itemId);
+    if (held) return false;
+    this.reserve(entry);
+    return true;
   }
 
   release(itemId: QueueItemId): void {

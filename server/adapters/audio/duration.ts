@@ -157,6 +157,110 @@ export function oggDurationMs(bytes: Uint8Array): number | null {
   return null;
 }
 
+/** Random access to a file that is already open; reads past the end return fewer bytes. */
+export interface AudioFileReader {
+  readonly size: number;
+  readAt(position: number, length: number): Promise<Uint8Array>;
+}
+
+const HEAD_BYTES = 256 * 1024;
+const WINDOW_BYTES = 64 * 1024;
+const TAIL_BYTES = 64 * 1024;
+
+/**
+ * Duration of a whole file from a bounded number of reads (head, one window
+ * after a large ID3 tag, tail): only container/frame-header counts, never
+ * bytes ÷ bitrate. A file whose length the headers cannot vouch for stays
+ * "unknown"; a truncated read is never measured as the whole track.
+ */
+export async function probeAudioFileDuration(file: AudioFileReader, format: string): Promise<DurationInfo> {
+  if (file.size <= HEAD_BYTES) return probeAudioDuration(await file.readAt(0, file.size), format);
+  const head = await file.readAt(0, HEAD_BYTES);
+  let ms: number | null = null;
+  if (format === "wav") ms = wavDurationMsFromHeader(head, file.size);
+  else if (format === "flac") ms = flacDurationMs(head);
+  else if (format === "mp3") {
+    const tagEnd = id3End(head);
+    const frames = tagEnd + WINDOW_BYTES <= head.length ? head.subarray(tagEnd) : await file.readAt(tagEnd, WINDOW_BYTES);
+    ms = mp3HeaderDurationMs(frames);
+  } else if (format === "ogg" || format === "opus") {
+    ms = oggDurationMsFromEnds(head, await file.readAt(Math.max(0, file.size - TAIL_BYTES), TAIL_BYTES));
+  }
+  return ms === null || !Number.isFinite(ms) || ms <= 0 || ms > 24 * 3600_000
+    ? { kind: "unknown" }
+    : { kind: "known", ms: Math.round(ms), source: "container-metadata" };
+}
+
+/** WAV data length from the chunk header, bounded by the real file size. */
+function wavDurationMsFromHeader(head: Uint8Array, fileSize: number): number | null {
+  if (ascii(head, 0, 4) !== "RIFF" || ascii(head, 8, 4) !== "WAVE") return null;
+  const data = view(head);
+  let offset = 12;
+  let byteRate = 0;
+  while (offset + 8 <= head.length) {
+    const id = ascii(head, offset, 4);
+    const size = data.getUint32(offset + 4, true);
+    const body = offset + 8;
+    if (id === "fmt " && body + 12 <= head.length) byteRate = data.getUint32(body + 8, true);
+    if (id === "data") {
+      if (!byteRate) return null;
+      const available = Math.min(size === 0xffffffff ? Number.MAX_SAFE_INTEGER : size, fileSize - body);
+      return (available / byteRate) * 1000;
+    }
+    offset = body + size + (size % 2);
+  }
+  return null;
+}
+
+function id3End(bytes: Uint8Array): number {
+  if (ascii(bytes, 0, 3) !== "ID3" || bytes.length < 10) return 0;
+  const size = ((bytes[6]! & 0x7f) << 21) | ((bytes[7]! & 0x7f) << 14) | ((bytes[8]! & 0x7f) << 7) | (bytes[9]! & 0x7f);
+  return 10 + size + ((bytes[5]! & 0x10) !== 0 ? 10 : 0);
+}
+
+/** MP3 total from a Xing/Info or VBRI frame count only; without one the length is unknown. */
+function mp3HeaderDurationMs(bytes: Uint8Array): number | null {
+  for (let offset = 0, limit = Math.min(bytes.length, WINDOW_BYTES); offset < limit; offset += 1) {
+    const frame = mp3Frame(bytes, offset);
+    if (!frame || !mp3Frame(bytes, offset + frame.length)) continue;
+    const sideInfo = frame.version === 1 ? (frame.mono ? 17 : 32) : frame.mono ? 9 : 17;
+    const tagOffset = offset + 4 + sideInfo;
+    const tag = ascii(bytes, tagOffset, 4);
+    if ((tag === "Xing" || tag === "Info") && tagOffset + 12 <= bytes.length && view(bytes).getUint32(tagOffset + 4, false) & 1) {
+      const frames = view(bytes).getUint32(tagOffset + 8, false);
+      return frames > 0 ? ((frames * frame.samples) / frame.sampleRate) * 1000 : null;
+    }
+    if (ascii(bytes, offset + 36, 4) === "VBRI" && offset + 36 + 18 <= bytes.length) {
+      const frames = view(bytes).getUint32(offset + 36 + 14, false);
+      return frames > 0 ? ((frames * frame.samples) / frame.sampleRate) * 1000 : null;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Ogg rate from the first page, last granule from the final page in the tail. */
+function oggDurationMsFromEnds(head: Uint8Array, tail: Uint8Array): number | null {
+  if (ascii(head, 0, 4) !== "OggS" || head.length < 28) return null;
+  const packet = 27 + head[26]!;
+  let rate = 0;
+  let preSkip = 0;
+  if (ascii(head, packet, 8) === "OpusHead") {
+    rate = 48000;
+    preSkip = view(head).getUint16(packet + 10, true);
+  } else if (head[packet] === 1 && ascii(head, packet + 1, 6) === "vorbis") {
+    rate = view(head).getUint32(packet + 12, true);
+  }
+  if (!rate) return null;
+  for (let offset = tail.length - 14; offset >= 0; offset -= 1) {
+    if (tail[offset] !== 0x4f || ascii(tail, offset, 4) !== "OggS") continue;
+    const granule = view(tail).getBigInt64(offset + 6, true);
+    if (granule <= 0n) return null;
+    return ((Number(granule) - preSkip) / rate) * 1000;
+  }
+  return null;
+}
+
 export function flacDurationMs(bytes: Uint8Array): number | null {
   if (ascii(bytes, 0, 4) !== "fLaC" || bytes.length < 4 + 4 + 18) return null;
   if ((bytes[4]! & 0x7f) !== 0) return null;

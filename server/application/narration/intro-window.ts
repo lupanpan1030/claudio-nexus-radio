@@ -1,5 +1,16 @@
 /**
- * How much of a DJ voice may overlap the next track's intro.
+ * How much of a DJ voice may overlap the next track's intro — a planning
+ * helper only. Nothing in prepare/narration or the playback core calls it
+ * yet, so it does not make any transition talk over an intro today.
+ *
+ * Two different inputs are kept apart on purpose:
+ *  - `lyricOnsetHintMs`: the first sung line of source-timed lyrics. The plan
+ *    does not treat this as a trusted vocal entry (synced lyrics can be
+ *    offset from the recording); it is a hint for whoever verifies a window.
+ *  - `TrustedIntroWindow`: a vocal entry someone set by hand or verified
+ *    against this exact recording. Only this may produce an overlap budget;
+ *    without it the answer is "unavailable" (sequential talk, talk over the
+ *    crossfade, or no talk).
  *
  * Adapted (rewritten in TypeScript) from:
  *  - Music Assistant `providers/ai_radio/post_window.py` (is_sung / lyric_onset)
@@ -9,10 +20,12 @@
  *    below a floor refuses talk-over; unknown stays unknown), MIT,
  *    commit b5d1c4c159d5146239a9a933d36397a681fd1039.
  * See server/THIRD_PARTY_NOTICES.md. Changes: Chinese credit/section lines,
- * contract LyricsAsset input, explicit "unavailable" reasons, no
- * words-per-second estimate — only a measured voice duration is accepted.
+ * contract LyricsAsset input for the hint, the overlap budget requires an
+ * explicitly trusted window (a lyric line alone never qualifies), explicit
+ * "unavailable" reasons, no words-per-second estimate — only a measured
+ * voice duration is accepted.
  */
-import type { LyricsAsset } from "@claudio/contracts";
+import type { LyricsAsset, SourceRevision } from "@claudio/contracts";
 
 /** Music back at full level this long before the vocal (MA VOICE_OVER_RAMP 0.4 s). */
 export const VOICE_OVER_RAMP_MS = 400;
@@ -20,7 +33,7 @@ export const VOICE_OVER_RAMP_MS = 400;
 export const MIN_OVERLAP_MS = 1500;
 /** The voice keeps at least this much before the record comes in (MA POST_MIN_HEAD_SECONDS 1 s). */
 export const MIN_VOICE_HEAD_MS = 1000;
-/** A measured vocal entry earlier than this refuses talk-over entirely (SUB/WAVE floor 2.5 s). */
+/** A trusted vocal entry earlier than this refuses talk-over entirely (SUB/WAVE floor 2.5 s). */
 export const VOCAL_RUNWAY_FLOOR_MS = 2500;
 
 const SECTION_MARKERS = new Set([
@@ -51,15 +64,27 @@ export function isSungLine(text: string): boolean {
 }
 
 /**
- * Media time (ms) at which singing starts, from source-timed lyrics only.
- * Plain or estimated timelines yield null: their times are not evidence.
+ * Media time (ms) of the first sung line in source-timed lyrics. A hint
+ * only: synced lyrics may be offset from the recording, so this is not a
+ * vocal onset and never enables an overlap by itself. Plain or estimated
+ * timelines yield null.
  */
-export function vocalOnsetMs(asset: LyricsAsset): number | null {
+export function lyricOnsetHintMs(asset: LyricsAsset): number | null {
   if (asset.timing !== "native-line" && asset.timing !== "native-word") return null;
   const first = asset.lines
     .filter((line) => typeof line.startMs === "number" && isSungLine(line.text))
     .reduce<number | null>((earliest, line) => (earliest === null || line.startMs! < earliest ? line.startMs! : earliest), null);
   return first === null ? null : Math.max(0, first + asset.offsetMs);
+}
+
+/**
+ * A vocal entry that may be relied on for one exact recording revision:
+ * set by hand ("manual") or checked against the audio ("verified").
+ */
+export interface TrustedIntroWindow {
+  readonly sourceRevision: SourceRevision;
+  readonly vocalOnsetMs: number;
+  readonly evidence: "manual" | "verified";
 }
 
 export type IntroOverlap =
@@ -73,22 +98,30 @@ export type IntroOverlap =
     }
   | {
       readonly kind: "unavailable";
-      readonly reason: "no-timed-lyrics" | "voice-duration-unknown" | "vocals-too-early" | "voice-too-short";
+      readonly reason: "no-trusted-intro-window" | "voice-duration-unknown" | "vocals-too-early" | "voice-too-short";
     };
 
 /**
- * Decides talk-over-intro for one cue. `spokenMs` must be a measured voice
- * length at its real playback rate (contract `spokenDurationMs`); null means
- * unknown and the safe answer is "unavailable" (sequential talk or direct).
+ * Decides talk-over-intro for one cue. `window` must be explicit trusted
+ * evidence for the revision about to play (a lyric hint is not accepted);
+ * `spokenMs` must be a measured voice length at its real playback rate
+ * (contract `spokenDurationMs`). Missing either is "unavailable".
  */
-export function planIntroOverlap(input: { readonly lyrics: LyricsAsset | null; readonly spokenMs: number | null }): IntroOverlap {
-  const onset = input.lyrics ? vocalOnsetMs(input.lyrics) : null;
-  if (onset === null) return { kind: "unavailable", reason: "no-timed-lyrics" };
-  if (onset < VOCAL_RUNWAY_FLOOR_MS) return { kind: "unavailable", reason: "vocals-too-early" };
+export function planIntroOverlap(input: {
+  readonly sourceRevision: SourceRevision;
+  readonly window: TrustedIntroWindow | null;
+  readonly spokenMs: number | null;
+}): IntroOverlap {
+  const window = input.window;
+  if (!window || window.sourceRevision !== input.sourceRevision || (window.evidence !== "manual" && window.evidence !== "verified")) {
+    return { kind: "unavailable", reason: "no-trusted-intro-window" };
+  }
+  const onset = window.vocalOnsetMs;
+  if (!Number.isFinite(onset) || onset < VOCAL_RUNWAY_FLOOR_MS) return { kind: "unavailable", reason: "vocals-too-early" };
   if (input.spokenMs === null || !Number.isFinite(input.spokenMs)) return { kind: "unavailable", reason: "voice-duration-unknown" };
-  const window = onset - VOICE_OVER_RAMP_MS;
-  if (window < MIN_OVERLAP_MS) return { kind: "unavailable", reason: "vocals-too-early" };
-  const overlapMs = Math.min(window, input.spokenMs - MIN_VOICE_HEAD_MS);
+  const room = onset - VOICE_OVER_RAMP_MS;
+  if (room < MIN_OVERLAP_MS) return { kind: "unavailable", reason: "vocals-too-early" };
+  const overlapMs = Math.min(room, input.spokenMs - MIN_VOICE_HEAD_MS);
   if (overlapMs < MIN_OVERLAP_MS) return { kind: "unavailable", reason: "voice-too-short" };
   return { kind: "overlap", overlapMs, leadMs: input.spokenMs - overlapMs, vocalOnsetMs: onset };
 }

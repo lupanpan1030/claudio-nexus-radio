@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseClock, parseKrc, parseLrc, parseLyricsDocument, parsePlain } from "../application/lyrics/parse.ts";
 import { toAvailability } from "../application/lyrics/lyrics-service.ts";
-import { isSungLine, planIntroOverlap, vocalOnsetMs } from "../application/narration/intro-window.ts";
+import { isSungLine, lyricOnsetHintMs, planIntroOverlap } from "../application/narration/intro-window.ts";
 
 test("LRC clock keeps fractional precision instead of truncating to seconds", () => {
   assert.equal(parseClock("01:02.5"), 62_500);
@@ -65,7 +65,7 @@ test("plain text never receives timing and instrumental markers become missing",
   assert.equal(available.asset.recordingId, "rec-1");
 });
 
-test("vocal onset skips Chinese credit rows and section markers but not sung brackets", () => {
+test("the lyric onset hint skips Chinese credit rows and section markers but not sung brackets", () => {
   assert.equal(isSungLine("作词 : 某人"), false);
   assert.equal(isSungLine("编曲：某人"), false);
   assert.equal(isSungLine("[前奏]"), false);
@@ -84,17 +84,26 @@ test("vocal onset skips Chinese credit rows and section markers but not sung bra
       { startMs: 9000, text: "第一句" }
     ]
   };
-  assert.equal(vocalOnsetMs(asset), 9200);
-  assert.equal(vocalOnsetMs({ ...asset, timing: "plain-text" }), null);
+  assert.equal(lyricOnsetHintMs(asset), 9200);
+  assert.equal(lyricOnsetHintMs({ ...asset, timing: "plain-text" }), null);
 });
 
-test("intro overlap follows min(onset - ramp, voice - head) and refuses without measurements", () => {
-  const lyrics = { assetId: "a", recordingId: "r", sourceRevision: "s", timing: "native-line", offsetMs: 0, lines: [{ startMs: 8000, text: "唱" }] };
-  assert.deepEqual(planIntroOverlap({ lyrics, spokenMs: 5000 }), { kind: "overlap", overlapMs: 4000, leadMs: 1000, vocalOnsetMs: 8000 });
-  assert.deepEqual(planIntroOverlap({ lyrics, spokenMs: 20_000 }), { kind: "overlap", overlapMs: 7600, leadMs: 12_400, vocalOnsetMs: 8000 });
-  assert.deepEqual(planIntroOverlap({ lyrics, spokenMs: null }), { kind: "unavailable", reason: "voice-duration-unknown" });
-  assert.deepEqual(planIntroOverlap({ lyrics: null, spokenMs: 5000 }), { kind: "unavailable", reason: "no-timed-lyrics" });
-  const early = { ...lyrics, lines: [{ startMs: 2000, text: "唱" }] };
-  assert.deepEqual(planIntroOverlap({ lyrics: early, spokenMs: 5000 }), { kind: "unavailable", reason: "vocals-too-early" });
-  assert.deepEqual(planIntroOverlap({ lyrics, spokenMs: 2000 }), { kind: "unavailable", reason: "voice-too-short" });
+test("intro overlap needs an explicitly trusted window for this revision; a lyric line alone is never enough", () => {
+  const lyrics = { assetId: "a", recordingId: "r", sourceRevision: "s", timing: "native-word", offsetMs: 0, lines: [{ startMs: 8000, text: "唱" }] };
+  const hint = lyricOnsetHintMs(lyrics);
+  assert.equal(hint, 8000);
+  // The hint is not evidence: no window, no overlap — whatever the lyrics say.
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: null, spokenMs: 5000 }), { kind: "unavailable", reason: "no-trusted-intro-window" });
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: { sourceRevision: "s", vocalOnsetMs: hint, evidence: "lyrics" }, spokenMs: 5000 }), {
+    kind: "unavailable",
+    reason: "no-trusted-intro-window"
+  });
+  const trusted = { sourceRevision: "s", vocalOnsetMs: 8000, evidence: "verified" };
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "other", window: trusted, spokenMs: 5000 }), { kind: "unavailable", reason: "no-trusted-intro-window" }, "evidence is per revision");
+  // With trusted evidence the budget follows min(onset - ramp, voice - head).
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: trusted, spokenMs: 5000 }), { kind: "overlap", overlapMs: 4000, leadMs: 1000, vocalOnsetMs: 8000 });
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: { ...trusted, evidence: "manual" }, spokenMs: 20_000 }), { kind: "overlap", overlapMs: 7600, leadMs: 12_400, vocalOnsetMs: 8000 });
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: trusted, spokenMs: null }), { kind: "unavailable", reason: "voice-duration-unknown" });
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: { ...trusted, vocalOnsetMs: 2000 }, spokenMs: 5000 }), { kind: "unavailable", reason: "vocals-too-early" });
+  assert.deepEqual(planIntroOverlap({ sourceRevision: "s", window: trusted, spokenMs: 2000 }), { kind: "unavailable", reason: "voice-too-short" });
 });

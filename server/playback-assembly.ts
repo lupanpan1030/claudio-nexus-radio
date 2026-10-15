@@ -8,6 +8,7 @@ import { CueService } from "./application/narration/cue-service.js";
 import { VoiceService } from "./application/narration/voice-service.js";
 import { NowService } from "./application/now/now-service.js";
 import { DEFAULT_PLAYBACK_POLICY, type PlaybackPolicy } from "./application/policy.js";
+import { PlayabilityChecker } from "./application/playability.js";
 import { PreparationService } from "./application/preparation/preparation-service.js";
 import { SourceResolver, StreamAccess, StreamHandles } from "./application/sources.js";
 import { probeAudioDuration } from "./adapters/audio/duration.js";
@@ -40,6 +41,8 @@ export interface PlaybackAssembly {
   readonly services: PlaybackServices;
   readonly gc: PlaybackGc;
   readonly stores: ReturnType<typeof createSqlitePlaybackStores>;
+  /** List filtering for legacy chat/playlist/radio routes; never an identity check. */
+  readonly playability: PlayabilityChecker;
   /** Restart recovery: unfinished preparations/cues become "interrupted". */
   readonly recovered: { readonly preparations: number; readonly cues: number };
   close(): void;
@@ -77,7 +80,17 @@ export function assemblePlayback(input: PlaybackAssemblyInput): PlaybackAssembly
     openVoice: (binding, range, signal) => voices.open(binding, range, signal)
   });
   const lyrics = new LyricsService({ providers, resolvedSources: stores.resolvedSources, store: stores.lyrics, clock, policy });
-  const cues = new CueService({ store: stores.cues, scripts: stores.scripts, writer: input.writer, voices, providers, clock, ids, policy });
+  const cues = new CueService({
+    store: stores.cues,
+    scripts: stores.scripts,
+    started: stores.started,
+    writer: input.writer,
+    voices,
+    providers,
+    clock,
+    ids,
+    policy
+  });
   const preparations = new PreparationService({
     store: stores.preparations,
     reservations: stores.reservations,
@@ -101,6 +114,8 @@ export function assemblePlayback(input: PlaybackAssemblyInput): PlaybackAssembly
     cueStore: stores.cues,
     handles: stores.handles,
     reservations: stores.reservations,
+    resolvedSources: stores.resolvedSources,
+    providers,
     voices,
     now,
     clock,
@@ -112,6 +127,7 @@ export function assemblePlayback(input: PlaybackAssemblyInput): PlaybackAssembly
     services: { preparations, cues, sources, streams, lyrics, started, now, audits: stores.audits, providers, policy, serverInstanceId },
     gc,
     stores,
+    playability: new PlayabilityChecker({ providers, clock, policy }),
     recovered,
     close() {
       preparations.close();

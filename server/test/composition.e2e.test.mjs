@@ -126,7 +126,7 @@ test("real composition serves the local path end to end without writing legacy h
     assert.equal(out.cue.script.status, "failed", "no model configured: the DJ script fails explicitly");
     assert.equal(out.cue.script.error.code, "script_writer_not_configured");
     assert.equal(out.cue.voice, "skipped");
-    assert.deepEqual(out.counts, { plays: 0, started: 1, radioPicks: 0, schema: 3 });
+    assert.deepEqual(out.counts, { plays: 0, started: 1, radioPicks: 0, schema: 4 });
     assert.deepEqual(
       out.kugou,
       { code: "kugou_unreachable", enabled: false, attempts: 0, launches: 0, runtimeDir: false },

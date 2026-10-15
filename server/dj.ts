@@ -1,4 +1,5 @@
 import { validateLockedDjDecision } from "./dj-contract.js";
+import { formatHandoverContext, type DjHandoverContext } from "./dj-handover.js";
 import { generateModelFirstDjLine } from "./dj-model-first.js";
 export {
   generateProgramLine,
@@ -21,7 +22,7 @@ import {
   updateLatestRecommendationAuditLine,
   updateLatestRadioPickLine
 } from "./db.js";
-import type { ClaudeDecision, RadioPick } from "./types.js";
+import type { ClaudeDecision, RadioPick, Track } from "./types.js";
 
 type DjLineInput = {
   songId: string;
@@ -60,6 +61,16 @@ export async function generateDjLine(input: DjLineInput): Promise<DjLineResult> 
   if (!track) {
     throw new Error("track not found");
   }
+  return generateDjLineForTrack({ ...input, track });
+}
+
+/**
+ * Same writer for a track given by metadata (e.g. a catalog entry without a
+ * legacy row), with the v1 hand-over context. Only title/artist/album reach
+ * the prompt; nothing is written back unless dryRun is false.
+ */
+export async function generateDjLineForTrack(input: Omit<DjLineInput, "songId"> & { track: Track; handover?: DjHandoverContext }): Promise<DjLineResult> {
+  const { track } = input;
   const lineMode: TrackLineMode = "plain_note";
   if (!hasLlm()) throw new Error("AI DJ is not configured");
 
@@ -68,6 +79,7 @@ export async function generateDjLine(input: DjLineInput): Promise<DjLineResult> 
     query: input.query,
     reason: input.reason,
     contextProfile: "minimal",
+    handoverContext: input.handover ? formatHandoverContext(input.handover) : undefined,
     signal: input.signal
   });
   if (input.signal?.aborted) throw new Error("DJ line request was cancelled");

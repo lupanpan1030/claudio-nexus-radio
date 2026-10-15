@@ -4,7 +4,7 @@ import type { PlaybackPolicy } from "./application/policy.js";
 import { FishSpeechSynthesis } from "./adapters/fish/fish-tts.js";
 import { KuGouClient } from "./adapters/kugou/client.js";
 import { KuGouLyrics, KuGouMediaSource } from "./adapters/kugou/kugou-source.js";
-import { LegacyModelScriptWriter, LegacyRulesRadioCandidates } from "./adapters/legacy/legacy-planning.js";
+import { LegacyModelScriptWriter, LegacyRulesRadioCandidates, type LegacyDjTrack } from "./adapters/legacy/legacy-planning.js";
 import { LocalFingerprints, LocalMediaSource, LocalSidecarLyrics } from "./adapters/local/local-source.js";
 import { LegacyTrackCatalog, TrackRowReader } from "./adapters/sqlite/track-catalog.js";
 import type { AppDeps } from "./http/app.js";
@@ -26,6 +26,26 @@ export function legacyRefFor(row: { id: string; source: string }): TrackRef | nu
       ? LOCAL_PROVIDER
       : null;
   return providerId ? { providerId, mediaId: asId<MediaId>(row.id) } : null;
+}
+
+/**
+ * A catalog entry without a legacy row, described to the legacy DJ writer by
+ * its metadata. Only title/artist/album reach the prompt; it is never stored.
+ */
+function promptOnlyTrack(track: LegacyDjTrack): Track {
+  return {
+    id: `catalog:${track.title}:${track.artist}`,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    filePath: "",
+    folder: "",
+    extension: "",
+    source: "main",
+    playable: true,
+    size: 0,
+    addedAt: ""
+  };
 }
 
 export interface PlaybackSettings {
@@ -140,7 +160,13 @@ export async function createServices(env: NodeJS.ProcessEnv = process.env): Prom
     providers,
     radio: new LegacyRulesRadioCandidates({ choose: radio.chooseRadioCandidate, toLegacyId, describeLegacy }),
     writer: new LegacyModelScriptWriter(
-      (input) => dj.generateDjLine({ songId: input.songId, reason: input.reason, dryRun: true, signal: input.signal }),
+      (input) =>
+        dj.generateDjLineForTrack({
+          track: (input.track.legacyTrackId ? db.getTrack(input.track.legacyTrackId) : undefined) ?? promptOnlyTrack(input.track),
+          handover: input.handover,
+          dryRun: true,
+          signal: input.signal
+        }),
       llm.hasLlm
     ),
     tts: new FishSpeechSynthesis({
@@ -157,20 +183,10 @@ export async function createServices(env: NodeJS.ProcessEnv = process.env): Prom
     policy: settings.policy
   });
 
+  // List filtering only (chat/playlist/radio queue): cheap local checks, briefly remembered remote resolves.
   const verifyPlayable = async (track: Pick<Track, "id" | "source">) => {
     const ref = legacyRefFor(track);
-    const module = ref ? playback.services.providers.get(ref.providerId) : undefined;
-    if (!ref || !module) return false;
-    try {
-      await module.source.resolve(ref, {
-        signal: AbortSignal.timeout(playback.services.policy.sourceDeadlineMs),
-        reason: "initial",
-        previous: null
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    return ref ? playback.playability.check(ref, AbortSignal.timeout(playback.services.policy.sourceDeadlineMs)) : false;
   };
   const recentTracks = (): Track[] => {
     const started = playback.stores.started

@@ -7,6 +7,7 @@ import {
   type PreparationStatusV1,
   type PreparedItemV1,
   type PrepareRequestV1,
+  type QueueItemId,
   type TrackRef
 } from "@claudio/contracts";
 import type { ProviderRegistry } from "../../ports/providers.js";
@@ -25,7 +26,7 @@ import type { LyricsService } from "../lyrics/lyrics-service.js";
 import type { CueService } from "../narration/cue-service.js";
 import { raceAbort, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
-import type { SourceResolver } from "../sources.js";
+import { sameRef, type SourceResolver } from "../sources.js";
 import { advance, failed, inProgress, pending, ready, settledFromError, skipped, terminate } from "../stages.js";
 import { Watchers } from "../watchers.js";
 
@@ -110,8 +111,24 @@ export class PreparationService {
     return this.toWire(await this.waitForSource(preparationId, policy.prepareResponseWaitMs, signal));
   }
 
+  /** The current record; one past its expiry is settled as expired on read rather than at the next GC tick. */
   get(preparationId: PreparationId): PreparationRecord | null {
-    return this.jobs.get(preparationId)?.record ?? this.deps.store.get(preparationId);
+    const record = this.jobs.get(preparationId)?.record ?? this.deps.store.get(preparationId);
+    return record ? this.expireIfDue(record) : null;
+  }
+
+  /**
+   * A resolve that names a preparation refreshes that preparation's source:
+   * the preparation must exist, belong to the item, and have settled its
+   * candidate on the very same track. Its source revision may have moved on
+   * through earlier refreshes; only the target is pinned.
+   */
+  checkRefreshTarget(preparationId: PreparationId, itemId: QueueItemId, track: TrackRef): void {
+    const record = this.get(preparationId);
+    if (!record || record.itemId !== itemId) throw appError("invalid", "preparation_mismatch", "preparationId does not belong to this item");
+    const candidate = record.stages.candidate;
+    if (candidate.status !== "ready") throw appError("invalid", "preparation_without_candidate", "the preparation has no settled candidate to refresh");
+    if (!sameRef(candidate.value.track, track)) throw appError("invalid", "preparation_track_mismatch", "the preparation prepared another track");
   }
 
   /**
@@ -126,7 +143,7 @@ export class PreparationService {
       if (remaining <= 0 || signal.aborted) break;
       current = (await this.watchers.next(preparationId, remaining, signal)) ?? this.get(preparationId);
     }
-    return current;
+    return current ? this.expireIfDue(current) : null;
   }
 
   cancel(preparationId: PreparationId): PreparationRecord | null {
@@ -142,6 +159,11 @@ export class PreparationService {
       count += 1;
     }
     return count;
+  }
+
+  private expireIfDue(record: PreparationRecord): PreparationRecord {
+    if ((record.status !== "active" && record.status !== "ready") || record.expiresAt > this.deps.clock.now()) return record;
+    return this.finish(record.preparationId, "expired") ?? record;
   }
 
   recoverAfterRestart(): number {
@@ -278,39 +300,54 @@ export class PreparationService {
       return { track: entry.ref, display: entry.display };
     }
 
-    const now = clock.now();
-    const exclude: TrackRef[] = [...reservations.activeRefs(now)];
+    const listening = history.recentRefs(RECENT_LISTENING_WINDOW);
+    const recent = [...listening.started, ...listening.legacy];
+    // Refs this job lost to another item while its pick was in flight; excluded from the re-pick.
+    const lost: TrackRef[] = [];
+    const scoped = withDeadline(signal, policy.candidateDeadlineMs);
+    try {
+      for (let attempt = 0; attempt <= policy.candidateReservationRetries; attempt += 1) {
+        const pick = await raceAbort(radio.pick({ exclude: [...this.currentExclusions(job), ...lost], recent, signal: scoped.signal }), scoped.signal);
+        throwIfAborted(scoped.signal);
+        if (!pick) throw appError("unavailable", "no_candidate", "no radio candidate is available");
+        if (this.jobs.get(job.record.preparationId) !== job) throw new OperationAbort("cancelled");
+        // The pick awaited: other preparations may have reserved meanwhile. Check and reserve in one synchronous step.
+        const reserved = reservations.tryReserve({
+          itemId: request.itemId,
+          preparationId: job.record.preparationId,
+          track: pick.entry.ref,
+          until: job.record.expiresAt,
+          at: clock.now()
+        });
+        if (!reserved) {
+          lost.push(pick.entry.ref);
+          continue;
+        }
+        audits.insert({
+          preparationId: job.record.preparationId,
+          itemId: request.itemId,
+          selected: pick.entry.ref,
+          policy: pick.policy,
+          reason: pick.reason,
+          considered: pick.considered.slice(0, 12),
+          createdAt: clock.now()
+        });
+        return { track: pick.entry.ref, display: pick.entry.display, reason: pick.reason.slice(0, 1000) };
+      }
+      throw appError("unavailable", "no_candidate", "every radio candidate picked was reserved by another item");
+    } finally {
+      scoped.dispose();
+    }
+  }
+
+  /** Refs reserved by other items, cooling down after a failure, or already chosen by another running job. */
+  private currentExclusions(job: PreparationJob): TrackRef[] {
+    const exclude: TrackRef[] = [...this.deps.reservations.activeRefs(this.deps.clock.now())];
     for (const other of this.jobs.values()) {
       const stage = other.record.stages.candidate;
       if (other !== job && stage.status === "ready") exclude.push(stage.value.track);
     }
-    const listening = history.recentRefs(RECENT_LISTENING_WINDOW);
-    const scoped = withDeadline(signal, policy.candidateDeadlineMs);
-    try {
-      const pick = await raceAbort(radio.pick({ exclude, recent: [...listening.started, ...listening.legacy], signal: scoped.signal }), scoped.signal);
-      throwIfAborted(scoped.signal);
-      if (!pick) throw appError("unavailable", "no_candidate", "no radio candidate is available");
-      if (this.jobs.get(job.record.preparationId) !== job) throw new OperationAbort("cancelled");
-      reservations.reserve({
-        itemId: request.itemId,
-        preparationId: job.record.preparationId,
-        track: pick.entry.ref,
-        until: job.record.expiresAt,
-        at: clock.now()
-      });
-      audits.insert({
-        preparationId: job.record.preparationId,
-        itemId: request.itemId,
-        selected: pick.entry.ref,
-        policy: pick.policy,
-        reason: pick.reason,
-        considered: pick.considered.slice(0, 12),
-        createdAt: clock.now()
-      });
-      return { track: pick.entry.ref, display: pick.entry.display, reason: pick.reason.slice(0, 1000) };
-    } finally {
-      scoped.dispose();
-    }
+    return exclude;
   }
 
   private startCue(job: PreparationJob, target: TrackRef): void {

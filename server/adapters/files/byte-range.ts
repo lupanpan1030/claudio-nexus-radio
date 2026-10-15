@@ -65,6 +65,34 @@ export function fileStream(filePath: string, size: number, contentType: string, 
   };
 }
 
+/**
+ * Same semantics over a file that is already open: the bytes come from that
+ * descriptor, never from re-opening the path. The handle is closed when the
+ * body ends, is destroyed, or there is no body.
+ */
+export async function fileHandleStream(
+  handle: fs.promises.FileHandle,
+  size: number,
+  contentType: string,
+  rangeHeader: string | null,
+  signal: AbortSignal
+): Promise<MediaStream> {
+  const range = parseByteRange(rangeHeader, size);
+  if (range === "unsatisfiable") {
+    await handle.close();
+    return { status: 416, headers: { "Content-Range": `bytes */${size}` }, body: null };
+  }
+  const start = range === null ? 0 : range.start;
+  const end = range === null ? size - 1 : range.end;
+  const headers: Record<string, string> = { "Content-Type": contentType, "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes" };
+  if (range !== null) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+  if (size === 0) {
+    await handle.close();
+    return { status: 200, headers, body: (async function* () {})() };
+  }
+  return { status: range === null ? 200 : 206, headers, body: handle.createReadStream({ start, end, autoClose: true, signal }) };
+}
+
 /** Same semantics over an in-memory buffer (fixtures and fake providers). */
 export function bytesStream(bytes: Uint8Array, contentType: string, rangeHeader: string | null): MediaStream {
   const range = parseByteRange(rangeHeader, bytes.length);

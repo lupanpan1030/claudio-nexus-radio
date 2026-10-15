@@ -230,6 +230,23 @@ export const MIGRATIONS: readonly Migration[] = [
       // Cached lyrics from an older parser (version 0) are re-derived on the next request, never served.
       addColumnIfMissing(db, "lyrics_assets", "parser_version", "INTEGER NOT NULL DEFAULT 0");
     }
+  },
+  {
+    version: 4,
+    name: "file-identity-activation-scrub",
+    up(db) {
+      // Exact file identity (decimal strings: nanosecond times exceed Number precision). Rows written
+      // before this version have NULLs and never match, so their content is hashed again.
+      addColumnIfMissing(db, "local_content_fingerprints", "dev", "TEXT");
+      addColumnIfMissing(db, "local_content_fingerprints", "ino", "TEXT");
+      addColumnIfMissing(db, "local_content_fingerprints", "mtime_ns", "TEXT");
+      addColumnIfMissing(db, "local_content_fingerprints", "ctime_ns", "TEXT");
+      // First successful open of a stream handle (epoch ms of the admitting request); NULL = never opened.
+      addColumnIfMissing(db, "playback_stream_handles", "first_opened_at", "INTEGER");
+      // Provider load deadline of the stored binding, and when its private parts were erased.
+      addColumnIfMissing(db, "playback_resolved_sources", "expires_at", "INTEGER");
+      addColumnIfMissing(db, "playback_resolved_sources", "binding_scrubbed_at", "INTEGER");
+    }
   }
 ];
 

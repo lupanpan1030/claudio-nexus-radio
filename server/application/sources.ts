@@ -69,11 +69,14 @@ export class SourceResolver {
     if (!provider || !entry) throw appError("unavailable", "track_not_found", "track is not in the catalog");
     if (!entry.playable) throw appError("unavailable", "track_not_playable", "track has no playable source");
 
+    // A revision this server issued names one ref: refreshing another ref from it is a caller error, not a fresh start.
+    // An unknown revision (never issued here, or collected) carries no binding: the ref is located again and keeps
+    // the old revision only if the provider proves the same recording again.
     const previousRecord = input.previousRevision ? resolvedSources.get(input.previousRevision) : null;
-    const previous =
-      previousRecord && sameRef(previousRecord.track, input.track)
-        ? { sourceRevision: previousRecord.sourceRevision, binding: previousRecord.binding }
-        : null;
+    if (previousRecord && !sameRef(previousRecord.track, input.track)) {
+      throw appError("invalid", "previous_revision_mismatch", "previousRevision belongs to another track");
+    }
+    const previous = previousRecord ? { sourceRevision: previousRecord.sourceRevision, binding: previousRecord.binding } : null;
 
     const scoped = withDeadline(signal, policy.sourceDeadlineMs);
     let resolved: ResolvedSource;
@@ -90,7 +93,7 @@ export class SourceResolver {
       // A revision string may never name two different recordings.
       throw appError("unavailable", "revision_conflict", "provider produced a revision already bound elsewhere");
     }
-    const record: ResolvedSourceRecord = {
+    const record: Omit<ResolvedSourceRecord, "bindingScrubbedAt"> = {
       sourceRevision: resolved.sourceRevision,
       track: input.track,
       legacyTrackId: entry.legacyTrackId,
@@ -99,7 +102,8 @@ export class SourceResolver {
       duration: resolved.duration,
       binding: resolved.binding,
       firstSeenAt: known?.firstSeenAt ?? now,
-      lastSeenAt: now
+      lastSeenAt: now,
+      expiresAt: resolved.expiresAt
     };
     resolvedSources.upsert(record);
 
@@ -133,7 +137,18 @@ export class SourceResolver {
 
 export type VoiceStreamOpener = (binding: SourceBinding, range: string | null, signal: AbortSignal) => Promise<MediaStream>;
 
-/** Serves an issued handle: exactly its bound recording, or a classified failure. */
+/**
+ * Serves an issued handle: exactly its bound recording, or a classified
+ * failure. A media handle that was never opened is refused once its load
+ * deadline has passed; the first successful open (whatever its method or
+ * Range) activates it, and an activated handle keeps serving Range requests
+ * until retainUntil. Admission is judged at the time the request arrived, so
+ * a slow upstream that answers after the deadline does not turn a request
+ * admitted in time into a refusal, nor a late request into an admission.
+ * Activation only means some loader opened the handle: it is not "playing",
+ * writes no started fact, and cannot tell a second fresh load of the same
+ * handle from a continuing one (the executor checks expiry before loading).
+ */
 export class StreamAccess {
   constructor(
     private readonly deps: {
@@ -147,7 +162,17 @@ export class StreamAccess {
   async open(token: string, range: string | null, signal: AbortSignal): Promise<MediaStream> {
     const record = this.deps.handles.get(token);
     if (!record) throw appError("expired", "unknown_stream_handle", "stream handle is unknown or was collected");
-    if (this.deps.clock.now() > record.retainUntil) throw appError("expired", "stream_expired", "stream handle expired");
+    const admittedAt = this.deps.clock.now();
+    if (admittedAt > record.retainUntil) throw appError("expired", "stream_expired", "stream handle expired");
+    if (record.firstOpenedAt === null && record.expiresAt !== null && admittedAt > record.expiresAt) {
+      throw appError("expired", "stream_never_opened", "the handle was not opened before its load deadline; resolve again");
+    }
+    const stream = await this.openRecord(record, range, signal);
+    if (stream.status !== 416 && record.firstOpenedAt === null) this.deps.handles.markOpened(token, admittedAt);
+    return stream;
+  }
+
+  private openRecord(record: StreamHandleRecord, range: string | null, signal: AbortSignal): Promise<MediaStream> {
     if (record.kind === "voice") return this.deps.openVoice(record.binding, range, signal);
     if (!record.providerId) throw appError("invalid", "stream_handle_corrupt");
     if (record.binding.revoked === true) throw appError("auth-required", "stream_revoked", "provider account changed");

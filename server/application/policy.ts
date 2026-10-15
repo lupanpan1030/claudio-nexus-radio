@@ -15,6 +15,14 @@ export interface PlaybackPolicy {
   readonly voiceDeadlineMs: number;
   /** How long a source that failed to resolve stays excluded from radio candidates. */
   readonly failedCandidateCooldownMs: number;
+  /** Re-picks after the picked radio candidate was reserved by another item meanwhile; then no_candidate. */
+  readonly candidateReservationRetries: number;
+  /** How long a "playable" list answer from a real resolve is reused (per ref + provider scope). */
+  readonly playabilityMemoMs: number;
+  /** How long a "not playable" list answer is reused. */
+  readonly playabilityNegativeMemoMs: number;
+  /** Most remembered playability answers (oldest dropped first). */
+  readonly playabilityMemoEntries: number;
   /** Range requests on an already loaded handle keep working this long past its load deadline. */
   readonly streamGraceMs: number;
   /** Unused voice cache files older than this may be removed by GC. */
@@ -37,6 +45,10 @@ export const DEFAULT_PLAYBACK_POLICY: PlaybackPolicy = Object.freeze({
   scriptDeadlineMs: 90_000,
   voiceDeadlineMs: 60_000,
   failedCandidateCooldownMs: 10 * 60_000,
+  candidateReservationRetries: 2,
+  playabilityMemoMs: 5 * 60_000,
+  playabilityNegativeMemoMs: 30_000,
+  playabilityMemoEntries: 1000,
   streamGraceMs: 3 * 3600_000,
   voiceRetentionMs: 30 * 24 * 3600_000,
   voicePlaybackRate: 0.86,

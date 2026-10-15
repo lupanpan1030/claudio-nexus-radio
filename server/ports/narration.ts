@@ -7,6 +7,14 @@ export interface ScriptRequest {
   readonly to: CatalogEntry;
   /** The item playing before the hand-over, when known. */
   readonly from: CatalogEntry | null;
+  /** Catalog entries of recently *started* items, newest first (confirmed listening, never mere selections). */
+  readonly recentStarted: readonly CatalogEntry[];
+  /**
+   * Recently generated narration texts, newest first. Generated is not aired
+   * (a cue may have been cancelled or skipped): use them to avoid repeating
+   * wording, never as things the listener heard.
+   */
+  readonly recentGenerated: readonly string[];
   readonly signal: AbortSignal;
 }
 
