@@ -1,8 +1,9 @@
-import { PREPARATION_DEFAULTS } from "@claudio/contracts";
+import { PLAYBACK_BUDGETS, PREPARATION_DEFAULTS } from "@claudio/contracts";
 
 /**
  * Preparation/asset policy. TTL, active limit and GC age come from the shared
- * R1 defaults; deadlines are configuration defaults, not measured optima.
+ * R1 defaults; stage deadlines and long-poll holds come from the shared
+ * playback budget that clients derive their timeouts from.
  */
 export interface PlaybackPolicy {
   readonly maxTtlMs: number;
@@ -39,11 +40,11 @@ export const DEFAULT_PLAYBACK_POLICY: PlaybackPolicy = Object.freeze({
   maxTtlMs: PREPARATION_DEFAULTS.maxTtlMs,
   activeItemLimit: PREPARATION_DEFAULTS.activeItemLimit,
   gcAfterMs: PREPARATION_DEFAULTS.gcAfterMs,
-  candidateDeadlineMs: 15_000,
-  sourceDeadlineMs: 20_000,
-  lyricsDeadlineMs: 15_000,
-  scriptDeadlineMs: 90_000,
-  voiceDeadlineMs: 60_000,
+  candidateDeadlineMs: PLAYBACK_BUDGETS.candidateMs,
+  sourceDeadlineMs: PLAYBACK_BUDGETS.sourceMs,
+  lyricsDeadlineMs: PLAYBACK_BUDGETS.lyricsMs,
+  scriptDeadlineMs: PLAYBACK_BUDGETS.scriptMs,
+  voiceDeadlineMs: PLAYBACK_BUDGETS.voiceMs,
   failedCandidateCooldownMs: 10 * 60_000,
   candidateReservationRetries: 2,
   playabilityMemoMs: 5 * 60_000,
@@ -52,6 +53,33 @@ export const DEFAULT_PLAYBACK_POLICY: PlaybackPolicy = Object.freeze({
   streamGraceMs: 3 * 3600_000,
   voiceRetentionMs: 30 * 24 * 3600_000,
   voicePlaybackRate: 0.86,
-  prepareResponseWaitMs: 20_000,
-  maxLongPollMs: 25_000
+  prepareResponseWaitMs: PLAYBACK_BUDGETS.longPollMs,
+  maxLongPollMs: PLAYBACK_BUDGETS.longPollMs
 });
+
+/**
+ * Policy fields bounded by the shared budget. Clients size their timeouts
+ * from that budget without asking the server, so these may be configured
+ * lower but never higher: a longer server deadline would let the client give
+ * up first and cancel work that was still within its budget.
+ */
+export const BUDGET_BOUNDS = Object.freeze({
+  candidateDeadlineMs: PLAYBACK_BUDGETS.candidateMs,
+  sourceDeadlineMs: PLAYBACK_BUDGETS.sourceMs,
+  lyricsDeadlineMs: PLAYBACK_BUDGETS.lyricsMs,
+  scriptDeadlineMs: PLAYBACK_BUDGETS.scriptMs,
+  voiceDeadlineMs: PLAYBACK_BUDGETS.voiceMs,
+  prepareResponseWaitMs: PLAYBACK_BUDGETS.longPollMs,
+  maxLongPollMs: PLAYBACK_BUDGETS.longPollMs
+} satisfies Partial<Record<keyof PlaybackPolicy, number>>);
+
+export type BudgetBoundedKey = keyof typeof BUDGET_BOUNDS;
+
+/** Defaults plus overrides, with every budget-bounded field capped at its shared bound. */
+export function resolvePolicy(overrides: Partial<PlaybackPolicy> = {}): PlaybackPolicy {
+  const policy: { -readonly [K in keyof PlaybackPolicy]: PlaybackPolicy[K] } = { ...DEFAULT_PLAYBACK_POLICY, ...overrides };
+  for (const [key, bound] of Object.entries(BUDGET_BOUNDS) as [BudgetBoundedKey, number][]) {
+    policy[key] = Math.min(policy[key], bound);
+  }
+  return policy;
+}

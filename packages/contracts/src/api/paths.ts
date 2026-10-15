@@ -74,3 +74,52 @@ export const PREPARATION_DEFAULTS = Object.freeze({
   /** Completed records without active references are GC-eligible after this. */
   gcAfterMs: 24 * 3600_000
 });
+
+/**
+ * The one time budget (ms) of the v1 playback chain. The server's stage
+ * deadlines default to these and a deployment may only lower them; every
+ * client timeout below is derived from them, so a client never gives up
+ * before the server has had its full budget to settle a stage. Configuration
+ * starting points, not measured optima.
+ */
+export const PLAYBACK_BUDGETS = Object.freeze({
+  /** Radio candidate pick, all reservation retries included. */
+  candidateMs: 15_000,
+  /** One source resolution. */
+  sourceMs: 20_000,
+  /** One lyrics lookup for a resolved revision. */
+  lyricsMs: 15_000,
+  /** DJ script writing. */
+  scriptMs: 90_000,
+  /** Speech synthesis of one script. */
+  voiceMs: 60_000,
+  /** Longest the server holds one long-poll (GET preparation, POST narration) or a POST prepare. */
+  longPollMs: 8_000,
+  /** Network and serialization slack on top of the server's bound for one HTTP exchange. */
+  httpMarginMs: 4_000
+});
+
+/** Client deadline for one HTTP exchange: the server's bound for that exchange plus the margin. */
+export const PLAYBACK_HTTP_TIMEOUTS = Object.freeze({
+  /** POST prepare, GET preparation and POST narration: the server answers within longPollMs. */
+  longPollRequestMs: PLAYBACK_BUDGETS.longPollMs + PLAYBACK_BUDGETS.httpMarginMs,
+  /** POST resolve: the server resolves synchronously within sourceMs. */
+  resolveRequestMs: PLAYBACK_BUDGETS.sourceMs + PLAYBACK_BUDGETS.httpMarginMs,
+  /** POST lyrics: the server answers within lyricsMs. */
+  lyricsRequestMs: PLAYBACK_BUDGETS.lyricsMs + PLAYBACK_BUDGETS.httpMarginMs
+});
+
+/**
+ * Executor guards per operation kind: the server stages on the operation's
+ * path plus two long-poll rounds (one in flight when the stage settles, one
+ * to observe it). They only catch a hung port; by then the server has
+ * already settled the stage as timed-out.
+ *  prepare: candidate (radio) then source, observed by long-polls
+ *  cue:     script then voice, observed by long-polls
+ *  lyrics:  one POST answered within lyricsMs
+ */
+export const PLAYBACK_OPERATION_BUDGETS = Object.freeze({
+  prepare: PLAYBACK_BUDGETS.candidateMs + PLAYBACK_BUDGETS.sourceMs + 2 * PLAYBACK_BUDGETS.longPollMs,
+  cue: PLAYBACK_BUDGETS.scriptMs + PLAYBACK_BUDGETS.voiceMs + 2 * PLAYBACK_BUDGETS.longPollMs,
+  lyrics: PLAYBACK_BUDGETS.lyricsMs + 2 * PLAYBACK_BUDGETS.longPollMs
+});

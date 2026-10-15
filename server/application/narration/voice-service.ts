@@ -5,7 +5,7 @@ import type { AudioDurationProbe, SpeechSynthesisPort, VoiceFileStore } from "..
 import type { Clock, IdSource } from "../../ports/runtime.js";
 import type { StreamHandleStore, VoiceCacheEntry, VoiceCacheStore } from "../../ports/stores.js";
 import { appError, throwIfAborted } from "../errors.js";
-import { SharedFlight, withDeadline } from "../operations.js";
+import { raceAbort, SharedFlight, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
 import type { StreamHandles } from "../sources.js";
 
@@ -87,7 +87,8 @@ export class VoiceService {
     const { tts, cache, files, probe, clock, policy } = this.deps;
     const scoped = withDeadline(signal, policy.voiceDeadlineMs);
     try {
-      const bytes = await tts.synthesize(text, { signal: scoped.signal });
+      // The deadline settles the synthesis even when the provider ignores its signal.
+      const bytes = await raceAbort(tts.synthesize(text, { signal: scoped.signal }), scoped.signal);
       throwIfAborted(scoped.signal);
       if (bytes.byteLength < MIN_AUDIO_BYTES) throw appError("retryable", "tts_empty_audio", "speech provider returned no audio");
       const format = tts.descriptor.format;

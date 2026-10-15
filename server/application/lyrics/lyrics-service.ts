@@ -15,7 +15,7 @@ import type { ProviderRegistry } from "../../ports/providers.js";
 import type { Clock } from "../../ports/runtime.js";
 import type { LyricsAssetStore, ResolvedSourceRecord, ResolvedSourceStore } from "../../ports/stores.js";
 import { appError } from "../errors.js";
-import { SharedFlight, withDeadline } from "../operations.js";
+import { raceAbort, SharedFlight, withDeadline } from "../operations.js";
 import type { PlaybackPolicy } from "../policy.js";
 import { sameRef } from "../sources.js";
 import { LYRICS_PARSER_VERSION, looksInstrumental, parseLyricsDocument } from "./parse.js";
@@ -65,14 +65,18 @@ export class LyricsService {
       const scoped = withDeadline(signal, this.deps.policy.lyricsDeadlineMs);
       let raw: RawLyrics;
       try {
-        raw = await port.fetch(
-          {
-            recording: { recordingId: source.recordingId, confidence: source.confidence },
-            sourceRevision: source.sourceRevision,
-            duration: source.duration,
-            binding: source.binding
-          },
-          { signal: scoped.signal }
+        // The deadline settles the lookup even when the port ignores its signal.
+        raw = await raceAbort(
+          port.fetch(
+            {
+              recording: { recordingId: source.recordingId, confidence: source.confidence },
+              sourceRevision: source.sourceRevision,
+              duration: source.duration,
+              binding: source.binding
+            },
+            { signal: scoped.signal }
+          ),
+          scoped.signal
         );
       } finally {
         scoped.dispose();

@@ -3,6 +3,7 @@ import { createApp } from "./http/app.js";
 
 // Bootstrap only: assembly lives in composition.ts, routes in http/.
 const services = await createServices();
+for (const notice of services.settings.notices) console.warn(`Playback settings: ${notice}`);
 const { app, close } = createApp(services.appDeps);
 const { recovered } = services.playback;
 if (recovered.preparations || recovered.cues) {

@@ -1,4 +1,4 @@
-import type { ErrorInfo, FailureOutcome, OperationId, OperationKind, OperationOutcome, PlaybackFact } from "@claudio/contracts";
+import { PLAYBACK_OPERATION_BUDGETS, type ErrorInfo, type FailureOutcome, type OperationId, type OperationKind, type OperationOutcome, type PlaybackFact } from "@claudio/contracts";
 import { errorInfoOf, hostTimers, silentLog, type LogPort, type RuntimeClock, type Timers } from "./ports.js";
 
 export interface OperationDeadlines {
@@ -7,8 +7,13 @@ export interface OperationDeadlines {
   readonly lyrics: number;
 }
 
-/** Upper bounds, not measured optima: generous enough for TTS, small enough that a hung port cannot pin a cue forever. */
-export const DEFAULT_OPERATION_DEADLINES: OperationDeadlines = Object.freeze({ prepare: 20_000, cue: 30_000, lyrics: 15_000 });
+/**
+ * Hang guards from the shared playback budget: later than the server's own
+ * stage deadlines, so a timeout here means a port that never answered, not a
+ * slow but healthy server. A missed cue is still bounded by A's end (the core
+ * hands over directly).
+ */
+export const DEFAULT_OPERATION_DEADLINES: OperationDeadlines = Object.freeze({ ...PLAYBACK_OPERATION_BUDGETS });
 
 export interface OperationSpec<T> {
   readonly kind: OperationKind;

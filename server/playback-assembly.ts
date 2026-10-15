@@ -7,7 +7,7 @@ import { LyricsService } from "./application/lyrics/lyrics-service.js";
 import { CueService } from "./application/narration/cue-service.js";
 import { VoiceService } from "./application/narration/voice-service.js";
 import { NowService } from "./application/now/now-service.js";
-import { DEFAULT_PLAYBACK_POLICY, type PlaybackPolicy } from "./application/policy.js";
+import { resolvePolicy, type PlaybackPolicy } from "./application/policy.js";
 import { PlayabilityChecker } from "./application/playability.js";
 import { PreparationService } from "./application/preparation/preparation-service.js";
 import { SourceResolver, StreamAccess, StreamHandles } from "./application/sources.js";
@@ -55,7 +55,8 @@ export function assemblePlayback(input: PlaybackAssemblyInput): PlaybackAssembly
   runMigrations(input.db);
   const clock = input.clock ?? systemClock;
   const ids = input.ids ?? randomIds;
-  const policy: PlaybackPolicy = { ...DEFAULT_PLAYBACK_POLICY, ...input.policy };
+  // Deadlines above the shared budget are capped: clients never wait longer than that budget.
+  const policy: PlaybackPolicy = resolvePolicy(input.policy);
   const serverInstanceId = input.serverInstanceId ?? `srv_${randomUUID()}`;
   const stores = createSqlitePlaybackStores(input.db, input.legacyRef);
   const providers = new ProviderRegistry(input.providers);

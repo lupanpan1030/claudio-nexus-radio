@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { asId, type OperationId, type PlaybackFact } from "@claudio/contracts";
-import { OperationRunner, PortError } from "../src/index.js";
+import {
+  asId,
+  PLAYBACK_BUDGETS,
+  PLAYBACK_HTTP_TIMEOUTS,
+  PLAYBACK_OPERATION_BUDGETS,
+  type OperationId,
+  type OperationKind,
+  type PlaybackFact
+} from "@claudio/contracts";
+import { DEFAULT_OPERATION_DEADLINES, OperationRunner, PortError } from "../src/index.js";
 import { ManualTimers, flush } from "./helpers.js";
 
 function runner() {
@@ -96,3 +104,57 @@ test("dispose cancels everything in flight and later starts are ignored", async 
   ops.start(spec(opId(7), async () => "x"));
   assert.equal(ops.outcome(opId(7)), undefined);
 });
+
+test("default guards come from the shared budget: each kind outlives its slowest healthy server path, then still closes a hung port", async () => {
+  const facts: PlaybackFact[] = [];
+  const timers = new ManualTimers();
+  const ops = new OperationRunner({ emit: (fact) => facts.push(fact), timers, clock: () => timers.now });
+  assert.deepEqual(DEFAULT_OPERATION_DEADLINES, PLAYBACK_OPERATION_BUDGETS);
+
+  // Slowest healthy answer as the HTTP ports see it: every server stage on the path
+  // runs to its full budget, then the exchange in flight returns (at most one long-poll request).
+  const slowestHealthy: Record<OperationKind, number> = {
+    prepare: PLAYBACK_BUDGETS.candidateMs + PLAYBACK_BUDGETS.sourceMs + PLAYBACK_HTTP_TIMEOUTS.longPollRequestMs,
+    cue: PLAYBACK_BUDGETS.scriptMs + PLAYBACK_BUDGETS.voiceMs + PLAYBACK_HTTP_TIMEOUTS.longPollRequestMs,
+    // One POST: the port's own HTTP timeout ends it, never the guard.
+    lyrics: PLAYBACK_HTTP_TIMEOUTS.lyricsRequestMs
+  };
+  assert.ok(PLAYBACK_BUDGETS.lyricsMs < PLAYBACK_HTTP_TIMEOUTS.lyricsRequestMs && PLAYBACK_HTTP_TIMEOUTS.lyricsRequestMs < DEFAULT_OPERATION_DEADLINES.lyrics);
+
+  const kinds: OperationKind[] = ["prepare", "cue", "lyrics"];
+  const answers = new Map<OperationKind, (value: string) => void>();
+  kinds.forEach((kind, index) => {
+    ops.start(kindSpec(kind, opId(100 + index), () => new Promise<string>((resolve) => answers.set(kind, resolve))));
+    ops.start(kindSpec(kind, opId(200 + index), () => new Promise<string>(() => {})));
+  });
+  let elapsed = 0;
+  for (const kind of [...kinds].sort((a, b) => slowestHealthy[a] - slowestHealthy[b])) {
+    timers.advance(slowestHealthy[kind] - elapsed);
+    elapsed = slowestHealthy[kind];
+    answers.get(kind)!(kind);
+    await flush();
+    assert.equal(await ops.outcome(opId(100 + kinds.indexOf(kind))), "completed", `${kind} answered at ${elapsed} ms is delivered, not timed out`);
+    assert.ok(facts.some((fact) => fact.type === "receipt.settled" && fact.idempotencyKey === kind));
+  }
+  timers.advance(DEFAULT_OPERATION_DEADLINES.cue - elapsed);
+  for (const [index, kind] of kinds.entries()) assert.equal(await ops.outcome(opId(200 + index)), "timed-out", `${kind}: a hung port still ends`);
+  assert.equal(facts.filter((fact) => fact.type === "prepare.settled" && fact.outcome === "timed-out").length, 3);
+  assert.equal(ops.activeCount, 0);
+  assert.equal(timers.size, 0);
+});
+
+function kindSpec(kind: OperationKind, id: OperationId, run: (signal: AbortSignal) => Promise<string>) {
+  return {
+    kind,
+    opId: id,
+    run,
+    completed: (value: string): PlaybackFact => ({ type: "receipt.settled", idempotencyKey: asId(value), itemId: asId("i"), outcome: "recorded" }),
+    failed: (outcome: "failed" | "timed-out", error: { code: string }): PlaybackFact => ({
+      type: "prepare.settled",
+      opId: id,
+      itemId: asId("i"),
+      outcome,
+      error: { class: "retryable", code: error.code }
+    })
+  };
+}

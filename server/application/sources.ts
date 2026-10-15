@@ -13,7 +13,7 @@ import type { ProviderRegistry } from "../ports/providers.js";
 import type { Clock } from "../ports/runtime.js";
 import type { ResolvedSourceRecord, ResolvedSourceStore, StreamHandleRecord, StreamHandleStore } from "../ports/stores.js";
 import { appError, throwIfAborted } from "./errors.js";
-import { withDeadline } from "./operations.js";
+import { raceAbort, withDeadline } from "./operations.js";
 import type { PlaybackPolicy } from "./policy.js";
 
 /**
@@ -81,7 +81,8 @@ export class SourceResolver {
     const scoped = withDeadline(signal, policy.sourceDeadlineMs);
     let resolved: ResolvedSource;
     try {
-      resolved = await provider.source.resolve(input.track, { signal: scoped.signal, reason: input.reason, previous });
+      // The deadline settles the resolution even when the provider ignores its signal.
+      resolved = await raceAbort(provider.source.resolve(input.track, { signal: scoped.signal, reason: input.reason, previous }), scoped.signal);
       throwIfAborted(scoped.signal);
     } finally {
       scoped.dispose();

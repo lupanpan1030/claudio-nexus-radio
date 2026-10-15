@@ -1,6 +1,6 @@
 import path from "node:path";
 import { asId, type MediaId, type ProviderId, type TrackRef } from "@claudio/contracts";
-import type { PlaybackPolicy } from "./application/policy.js";
+import { BUDGET_BOUNDS, type BudgetBoundedKey, type PlaybackPolicy } from "./application/policy.js";
 import { FishSpeechSynthesis } from "./adapters/fish/fish-tts.js";
 import { KuGouClient } from "./adapters/kugou/client.js";
 import { KuGouLyrics, KuGouMediaSource } from "./adapters/kugou/kugou-source.js";
@@ -77,6 +77,8 @@ export interface PlaybackSettings {
   readonly kugouUrlTtlMs: number;
   readonly gcIntervalMs: number;
   readonly policy: Partial<PlaybackPolicy>;
+  /** Overrides that were capped or ignored, one readable line each (printed at startup). */
+  readonly notices: readonly string[];
 }
 
 function numberFrom(env: NodeJS.ProcessEnv, key: string): number | undefined {
@@ -86,25 +88,44 @@ function numberFrom(env: NodeJS.ProcessEnv, key: string): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/**
+ * Stage deadline overrides. They may lower a deadline, never raise it past
+ * the shared playback budget (PLAYBACK_BUDGETS): browsers size their own
+ * timeouts from that budget, so a longer server deadline would only make the
+ * browser give up first and cancel work that was still running.
+ */
+const DEADLINE_ENV: ReadonlyArray<readonly [BudgetBoundedKey, string]> = [
+  ["sourceDeadlineMs", "CLAUDIO_SOURCE_DEADLINE_MS"],
+  ["lyricsDeadlineMs", "CLAUDIO_LYRICS_DEADLINE_MS"],
+  ["scriptDeadlineMs", "CLAUDIO_SCRIPT_DEADLINE_MS"],
+  ["voiceDeadlineMs", "CLAUDIO_VOICE_DEADLINE_MS"]
+];
+
 /** v1 settings from the environment. Protocol defaults to v1 (single switch, chosen at startup). */
 export function readPlaybackSettings(env: NodeJS.ProcessEnv): PlaybackSettings {
   const policy: Partial<{ -readonly [K in keyof PlaybackPolicy]: PlaybackPolicy[K] }> = {};
-  const map: Array<[keyof PlaybackPolicy, string]> = [
-    ["sourceDeadlineMs", "CLAUDIO_SOURCE_DEADLINE_MS"],
-    ["lyricsDeadlineMs", "CLAUDIO_LYRICS_DEADLINE_MS"],
-    ["scriptDeadlineMs", "CLAUDIO_SCRIPT_DEADLINE_MS"],
-    ["voiceDeadlineMs", "CLAUDIO_VOICE_DEADLINE_MS"],
-    ["voicePlaybackRate", "CLAUDIO_VOICE_PLAYBACK_RATE"]
-  ];
-  for (const [key, envKey] of map) {
+  const notices: string[] = [];
+  const invalid = (envKey: string) => notices.push(`${envKey}=${JSON.stringify(env[envKey])} is not a positive finite number; ignored`);
+  for (const [key, envKey] of DEADLINE_ENV) {
     const value = numberFrom(env, envKey);
-    if (value !== undefined) policy[key] = value;
+    if (value === undefined) {
+      if (env[envKey] !== undefined && env[envKey] !== "") invalid(envKey);
+      continue;
+    }
+    const bound = BUDGET_BOUNDS[key];
+    if (value > bound) notices.push(`${envKey}=${value} exceeds the shared playback budget; using ${bound} ms (deadlines can only be lowered)`);
+    policy[key] = Math.min(value, bound);
   }
+  // Not a deadline: the voice rate is applied by the executor and has no budget bound.
+  const rate = numberFrom(env, "CLAUDIO_VOICE_PLAYBACK_RATE");
+  if (rate !== undefined) policy.voicePlaybackRate = rate;
+  else if (env.CLAUDIO_VOICE_PLAYBACK_RATE !== undefined && env.CLAUDIO_VOICE_PLAYBACK_RATE !== "") invalid("CLAUDIO_VOICE_PLAYBACK_RATE");
   return {
     protocol: env.CLAUDIO_PLAYBACK_PROTOCOL === "legacy" ? "legacy" : "v1",
     kugouUrlTtlMs: numberFrom(env, "CLAUDIO_KUGOU_URL_TTL_MS") ?? 20 * 60_000,
     gcIntervalMs: numberFrom(env, "CLAUDIO_GC_INTERVAL_MS") ?? 10 * 60_000,
-    policy
+    policy,
+    notices
   };
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { asId, type LoadId, type PlaybackReceipt, type ResolvedMedia } from "@claudio/contracts";
+import { asId, PLAYBACK_BUDGETS, PLAYBACK_HTTP_TIMEOUTS, PLAYBACK_OPERATION_BUDGETS, type LoadId, type PlaybackReceipt, type ResolvedMedia } from "@claudio/contracts";
 import { PortError, ReceiptReporter, createPlaybackRuntime, createStorageQueueStore, type PreparePort, type ReceiptPort } from "../src/index.js";
 import { FakeDriver } from "../src/testing/index.js";
 import { ControlledPort, ManualTimers, Ports, confirmPlaying, paused, createHarness, cueAsset, entry, flush, media, memoryStorage, resolvePrepare, type Harness } from "./helpers.js";
@@ -334,4 +334,56 @@ test("dispose during an in-flight receipt: a fetch-like port rejecting on abort 
   timers.advance(60_000);
   assert.equal(calls, 1, "no retry");
   assert.deepEqual(facts, []);
+});
+
+test("without configured guards the runtime uses the shared budget: a slow but healthy cue is delivered, a hung source ends at the prepare guard", async () => {
+  const h = createHarness({ djEnabled: true, deadlines: {} });
+  await startA(h, ["a", "b"]);
+  await resolvePrepare(h, "b");
+  const cue = h.ports.cue.last();
+  // Script and voice both run to their full server budget; the long-poll in flight then answers.
+  h.timers.advance(PLAYBACK_BUDGETS.scriptMs + PLAYBACK_BUDGETS.voiceMs + PLAYBACK_HTTP_TIMEOUTS.longPollRequestMs);
+  assert.equal(cue.signal.aborted, false, "the old 30 s guard would have cancelled this cue long ago");
+  cue.resolve(cueAsset());
+  await flush();
+  const load = h.driver.executed.find((e) => e.type === "voice.load");
+  assert.ok(load && load.type === "voice.load" && load.cueId === cue.request.binding.cueId, "the cue's voice is loaded");
+
+  const hung = createHarness({ deadlines: {} });
+  hung.runtime.dispatch({ type: "enqueue", position: "end", entries: [entry("x")] });
+  hung.runtime.dispatch({ type: "resume" });
+  const prepare = hung.ports.prepare.last();
+  hung.timers.advance(PLAYBACK_OPERATION_BUDGETS.prepare - 1);
+  assert.equal(prepare.signal.aborted, false);
+  assert.deepEqual(hung.runtime.getSnapshot().pending.map((op) => op.kind), ["prepare"]);
+  hung.timers.advance(1);
+  await flush();
+  assert.equal(prepare.signal.aborted, true);
+  assert.deepEqual(hung.runtime.getSnapshot().pending, []);
+  assert.equal(hung.runtime.getSnapshot().history.at(-1)?.outcome, "failed");
+});
+
+test("selecting an existing queue row through the runtime reuses B's preheated deck and preparation, keeps the queue and drops the old cue", async () => {
+  const h = createHarness({ djEnabled: true });
+  await startA(h, ["a", "b", "c"]);
+  await resolvePrepare(h, "b");
+  h.driver.deckEvent("B", { kind: "can-play", through: true });
+  const [b, c] = itemIds(h);
+  const cue = h.ports.cue.last();
+  const prepares = h.ports.prepare.calls.length;
+  const executed = h.driver.executed.length;
+
+  h.runtime.dispatch({ type: "select", target: { kind: "item", itemId: asId(b!) } });
+  const after = h.driver.executed.slice(executed);
+  assert.equal(after.some((e) => e.type === "deck.load"), false, "B is not reloaded");
+  assert.deepEqual(after.filter((e) => e.type === "deck.play").map((e) => "deck" in e && e.deck), ["B"]);
+  assert.equal(h.ports.prepare.calls.length, prepares, "no new preparation");
+  assert.equal(cue.signal.aborted, true, "the A→B narration request is aborted");
+  assert.deepEqual(itemIds(h), [b, c]);
+  assert.equal(h.runtime.getSnapshot().program?.item.itemId, b);
+
+  h.driver.deckEvent("B", { kind: "playing", positionMs: 0 });
+  await flush();
+  assert.deepEqual(h.runtime.getSnapshot().receipts.map((r) => r.itemId).at(-1), b);
+  assert.equal(h.log.filter((e) => e.event === "receipt.settled").length, 2, "A and B, once each");
 });

@@ -16,6 +16,7 @@ import {
   type LogEntry,
   type LyricsPort,
   type LyricsRequest,
+  type OperationDeadlines,
   type PausedObservation,
   type PlaybackRuntime,
   type PreparePort,
@@ -162,6 +163,8 @@ export function createHarness(
     queueStore?: QueueStore;
     portsOverride?: Partial<RuntimePorts>;
     receiptPolicy?: { maxAttempts?: number; attemptTimeoutMs?: number; backoffMs?: number[] };
+    /** Short test guards by default; `{}` runs with the runtime's shared-budget defaults. */
+    deadlines?: Partial<OperationDeadlines>;
   } = {}
 ): Harness {
   const ports = options.ports ?? new Ports();
@@ -181,7 +184,7 @@ export function createHarness(
     initialSettings: { djEnabled: options.djEnabled ?? false },
     queueStore: options.queueStore,
     receiptPolicy: options.receiptPolicy,
-    deadlines: { prepare: 5_000, cue: 8_000, lyrics: 4_000 }
+    deadlines: options.deadlines ?? { prepare: 5_000, cue: 8_000, lyrics: 4_000 }
   });
   return Object.assign(harness, { runtime, driver });
 }
