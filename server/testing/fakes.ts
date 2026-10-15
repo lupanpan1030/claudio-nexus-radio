@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
-import { asId, type MediaId, type ProviderId, type RecordingId, type SourceRevision, type TrackRef } from "@claudio/contracts";
+import { createHash, randomUUID } from "node:crypto";
+import { asId, type MediaId, type ProviderId, type RecordingId, type TrackRef } from "@claudio/contracts";
 import { appError, throwIfAborted } from "../application/errors.js";
+import { refScopedRevision } from "../application/sources.js";
 import { abortableDelay, raceAbort } from "../application/operations.js";
 import { probeAudioDuration } from "../adapters/audio/duration.js";
 import { bytesStream } from "../adapters/files/byte-range.js";
@@ -21,6 +22,11 @@ export interface FakeTrack {
   playable?: boolean;
   /** Resolution waits this long (abortable) — for deadline tests. */
   resolveDelayMs?: number;
+  /**
+   * The source cannot prove what it serves (no content hash): every
+   * resolution, refreshes included, is a new revision of an unverified recording.
+   */
+  continuityUnprovable?: boolean;
 }
 
 /**
@@ -70,9 +76,19 @@ export class FakeProvider implements CatalogPort, MediaSourcePort, LyricsSourceP
     if (track.resolveDelayMs) await abortableDelay(track.resolveDelayMs, context.signal);
     throwIfAborted(context.signal);
     const hash = createHash("sha256").update(track.bytes).digest("hex");
+    if (track.continuityUnprovable) {
+      return {
+        recording: { recordingId: asId<RecordingId>(`${this.providerId}:entry:${track.mediaId}`), confidence: "unverified" },
+        sourceRevision: refScopedRevision(`${this.providerId}-u-`, ref, [randomUUID()]),
+        duration: probeAudioDuration(track.bytes, "wav"),
+        capabilities: { seekable: true, rangeRequests: true },
+        expiresAt: null,
+        binding: { mediaId: track.mediaId, hash }
+      };
+    }
     return {
       recording: { recordingId: asId<RecordingId>(`${this.providerId}:${hash.slice(0, 24)}`), confidence: "content-hash" },
-      sourceRevision: asId<SourceRevision>(`${this.providerId}-${hash.slice(0, 32)}`),
+      sourceRevision: refScopedRevision(`${this.providerId}-`, ref, [hash]),
       duration: probeAudioDuration(track.bytes, "wav"),
       capabilities: { seekable: true, rangeRequests: true },
       expiresAt: null,

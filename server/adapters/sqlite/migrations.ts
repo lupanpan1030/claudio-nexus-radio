@@ -222,6 +222,14 @@ export const MIGRATIONS: readonly Migration[] = [
         );
       `);
     }
+  },
+  {
+    version: 3,
+    name: "lyrics-parser-version",
+    up(db) {
+      // Cached lyrics from an older parser (version 0) are re-derived on the next request, never served.
+      addColumnIfMissing(db, "lyrics_assets", "parser_version", "INTEGER NOT NULL DEFAULT 0");
+    }
   }
 ];
 

@@ -15,6 +15,7 @@ const repoRoot = path.dirname(serverDir);
 // data dirs, no provider keys and KuGou pointed at a closed port. It proves the
 // local path end to end; it says nothing about a real KuGou account or Fish.
 const CHILD = `
+const fs = await import("node:fs");
 const { createServices } = await import(process.env.COMPOSITION);
 const { createApp } = await import(process.env.APP);
 const out = {};
@@ -51,6 +52,12 @@ out.radioNext = (await call("POST", "/api/radio/next", {})).status;
 const cue = await call("POST", "/api/v1/playback/narration?waitMs=3000", { protocolVersion: 1, cueId: "e2e-cue", transitionId: "e2e-tr", preparationId: null, from: { itemId: "e2e-0", track, sourceRevision: null }, to: { itemId: "e2e-1", track, sourceRevision: media.sourceRevision } });
 out.cue = { script: cue.json.script, voice: cue.json.voice.status };
 const { DatabaseSync } = await import("node:sqlite");
+const writer = new DatabaseSync(process.env.DATA_DIR + "/radio.sqlite");
+writer.prepare("INSERT OR IGNORE INTO tracks (id, title, artist, album, file_path, folder, extension, source, playable, size, added_at) VALUES ('kg-e2e', 'Remote', 'Artist', 'KuGou', 'kugou://0123456789ABCDEF0123456789ABCDEF', 'KuGou API', 'remote', 'kugou-api', 1, 0, 'now')").run();
+writer.close();
+const kugouResolve = await call("POST", "/api/v1/playback/resolve", { protocolVersion: 1, itemId: "e2e-kg", track: { providerId: "kugou", mediaId: "kg-e2e" }, preparationId: null, reason: "initial", previousRevision: null });
+const { bundledKuGouApi } = await import(process.env.KUGOU);
+out.kugou = { code: kugouResolve.json.error?.code, enabled: bundledKuGouApi.enabled, attempts: bundledKuGouApi.attempts, launches: bundledKuGouApi.launches, runtimeDir: fs.existsSync(process.env.DATA_DIR + "/external") };
 const db = new DatabaseSync(process.env.DATA_DIR + "/radio.sqlite", { readOnly: true });
 out.counts = {
   plays: db.prepare("SELECT COUNT(*) AS n FROM plays").get().n,
@@ -75,7 +82,7 @@ test("real composition serves the local path end to end without writing legacy h
     fs.writeFileSync(path.join(dirs.music, "Artist - Song.lrc"), "[00:00.80]作词 : 某人\n[00:01.00]第一句\n");
     const script = path.join(work, "child.mjs");
     fs.writeFileSync(script, CHILD);
-    const run = () =>
+    const run = (extraEnv = {}) =>
       spawnSync(
         process.execPath,
         ["--import", path.join(repoRoot, "node_modules/tsx/dist/esm/index.mjs"), "--import", path.join(serverDir, "testing/register-workspace.mjs"), script],
@@ -95,7 +102,9 @@ test("real composition serves the local path end to end without writing legacy h
             AI_BASE_URL: "http://127.0.0.1:9",
             FISH_TTS_ENDPOINT: "http://127.0.0.1:9/v1/tts",
             COMPOSITION: path.join(serverDir, "composition.ts"),
-            APP: path.join(serverDir, "http/app.ts")
+            APP: path.join(serverDir, "http/app.ts"),
+            KUGOU: path.join(serverDir, "kugou.ts"),
+            ...extraEnv
           }
         }
       );
@@ -117,7 +126,12 @@ test("real composition serves the local path end to end without writing legacy h
     assert.equal(out.cue.script.status, "failed", "no model configured: the DJ script fails explicitly");
     assert.equal(out.cue.script.error.code, "script_writer_not_configured");
     assert.equal(out.cue.voice, "skipped");
-    assert.deepEqual(out.counts, { plays: 0, started: 1, radioPicks: 0, schema: 2 });
+    assert.deepEqual(out.counts, { plays: 0, started: 1, radioPicks: 0, schema: 3 });
+    assert.deepEqual(
+      out.kugou,
+      { code: "kugou_unreachable", enabled: false, attempts: 0, launches: 0, runtimeDir: false },
+      "KUGOU_API_AUTOSTART=false: the v1 client fails as unreachable and nothing is started"
+    );
 
     // Second boot on the same data: migrations are a no-op, nothing was left unfinished.
     const again = run();
@@ -126,6 +140,13 @@ test("real composition serves the local path end to end without writing legacy h
     assert.deepEqual(second.recovered, { preparations: 0, cues: 0 });
     assert.equal(second.scan, null, "non-empty catalog is not rescanned");
     assert.deepEqual(second.started, ["duplicate", "duplicate"], "the started key survives restarts");
+
+    // Autostart on, but no bundled API installed under DATA_DIR: the composed v1 client asks the shared
+    // starter once (probing the closed local port), finds nothing to launch and spawns nothing.
+    const enabled = run({ KUGOU_API_AUTOSTART: "true" });
+    assert.equal(enabled.status, 0, enabled.stderr);
+    const third = JSON.parse(enabled.stdout.trim().split("\n").at(-1));
+    assert.deepEqual(third.kugou, { code: "kugou_unreachable", enabled: true, attempts: 1, launches: 0, runtimeDir: false });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }

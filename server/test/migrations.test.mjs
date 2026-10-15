@@ -29,7 +29,7 @@ test("migrating an old-shape database twice is additive and idempotent", () => {
     INSERT INTO tracks VALUES ('legacy-1', 'T', 'A', 'B', '/music/a.mp3', 'x', 'mp3', 1, '2026-01-01T00:00:00.000Z');
     INSERT INTO plays (track_id, played_at, reason, dj_line) VALUES ('legacy-1', '2026-01-02T00:00:00.000Z', 'old', 'line');
   `);
-  assert.deepEqual(runMigrations(db), [1, 2]);
+  assert.deepEqual(runMigrations(db), [1, 2, 3]);
   assert.deepEqual(runMigrations(db), [], "second run applies nothing");
   assert.equal(schemaVersion(db), CURRENT_SCHEMA_VERSION);
   assert.ok(columns(db, "tracks").includes("source"));
@@ -59,7 +59,18 @@ test("a failing migration rolls back completely and records no version", () => {
   assert.equal(tables(db).includes("half_done"), false);
   assert.equal(columns(db, "plays").includes("semantics"), false);
   // The real migration still applies afterwards.
-  assert.deepEqual(runMigrations(db), [2]);
+  assert.deepEqual(runMigrations(db), [2, 3]);
+  db.close();
+});
+
+test("lyrics cached before the parser version existed stay but are marked as version 0", () => {
+  const db = new DatabaseSync(":memory:");
+  runMigrations(db, MIGRATIONS.filter((migration) => migration.version <= 2));
+  db.prepare("INSERT INTO lyrics_assets (source_revision, availability_json, created_at) VALUES ('rev-old', '{}', 1)").run();
+  assert.deepEqual(runMigrations(db), [3]);
+  assert.deepEqual(db.prepare("SELECT source_revision, availability_json, parser_version FROM lyrics_assets").all().map((row) => ({ ...row })), [
+    { source_revision: "rev-old", availability_json: "{}", parser_version: 0 }
+  ]);
   db.close();
 });
 

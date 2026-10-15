@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { asId, type DurationInfo, type RecordingId, type SourceRevision, type TrackRef } from "@claudio/contracts";
+import { asId, type DurationInfo, type RecordingId, type TrackRef } from "@claudio/contracts";
 import { appError, throwIfAborted } from "../../application/errors.js";
+import { refScopedRevision } from "../../application/sources.js";
 import type { RawLyrics, LyricsLookup, LyricsSourcePort } from "../../ports/lyrics.js";
 import type { MediaSourcePort, MediaStream, ResolveContext, ResolvedSource, SourceBinding, StreamRequest } from "../../ports/media-source.js";
 import { probeAudioDuration } from "../audio/duration.js";
@@ -67,8 +68,10 @@ function readBinding(binding: SourceBinding): LocalBinding {
 }
 
 /**
- * Local files. The recording identity is the file's content hash, so a
- * replaced file is a new revision; a handle never serves different bytes.
+ * Local files. The recording identity is the file's content hash, shared by
+ * every catalog entry holding the same bytes; the revision is scoped to the
+ * ref and the file, so two entries never share one, and a replaced or moved
+ * file is a new revision. A handle never serves different bytes.
  */
 export class LocalMediaSource implements MediaSourcePort {
   constructor(
@@ -101,7 +104,7 @@ export class LocalMediaSource implements MediaSourcePort {
     const binding: LocalBinding = { filePath, size: stat.size, mtimeMs: Math.trunc(stat.mtimeMs), sha256: fingerprint.sha256, extension };
     return {
       recording: { recordingId: asId<RecordingId>(`local:${fingerprint.sha256.slice(0, 32)}`), confidence: "content-hash" },
-      sourceRevision: asId<SourceRevision>(`lr-${fingerprint.sha256.slice(0, 40)}`),
+      sourceRevision: refScopedRevision("lr-", ref, [filePath, fingerprint.sha256]),
       duration: fingerprint.duration,
       capabilities: { seekable: true, rangeRequests: true },
       expiresAt: null,

@@ -24,6 +24,8 @@ export interface ManifestEntry {
   readonly files?: number;
   readonly bytes?: number;
   readonly sha256?: string;
+  /** Symlinks/special files not copied (directories only). */
+  readonly skipped?: number;
 }
 
 export interface BackupManifest {
@@ -47,6 +49,80 @@ const DIR_STATE: ReadonlyArray<{ name: string; role: string; format: string }> =
   { name: "tts-v2", role: "v1 voice cache", format: "content-keyed by provider/model/voice/format/options/text" }
 ];
 
+const PRIVATE_DIR = 0o700;
+const PRIVATE_FILE = 0o600;
+
+/**
+ * The backup root: created 0700 when absent (with any missing parents, which
+ * this task then owns), or an existing empty directory that is already
+ * private to this user. The mode of an existing directory or of its parents
+ * is never changed: a wider one is refused, before anything is copied.
+ */
+function prepareRoot(outDir: string): void {
+  let stat: fs.Stats | null = null;
+  try {
+    stat = fs.lstatSync(outDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (!stat) {
+    fs.mkdirSync(outDir, { recursive: true, mode: PRIVATE_DIR });
+    stat = fs.lstatSync(outDir);
+  } else {
+    if (!stat.isDirectory()) throw new Error(`backup target ${outDir} is not a directory`);
+    if (fs.readdirSync(outDir).length > 0) throw new Error(`backup target ${outDir} is not empty`);
+  }
+  if (!stat.isDirectory()) throw new Error(`backup target ${outDir} is not a directory`);
+  const uid = process.getuid?.();
+  if (uid !== undefined && stat.uid !== uid) throw new Error(`backup target ${outDir} is not owned by the current user`);
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error(
+      `backup target ${outDir} is accessible to other users (mode ${(stat.mode & 0o777).toString(8)}); use a new path or make it private (chmod 700) first`
+    );
+  }
+}
+
+/** A directory inside the backup, private from creation (umask can only narrow it). */
+function privateDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
+}
+
+/** Copies one regular file into a new 0600 file (exclusive create, no wider intermediate mode). */
+function copyPrivateFile(source: string, target: string): void {
+  const input = fs.openSync(source, "r");
+  try {
+    const output = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, PRIVATE_FILE);
+    try {
+      const buffer = Buffer.allocUnsafe(1024 * 1024);
+      for (;;) {
+        const read = fs.readSync(input, buffer, 0, buffer.length, null);
+        if (read === 0) break;
+        let written = 0;
+        while (written < read) written += fs.writeSync(output, buffer, written, read - written);
+      }
+      fs.fsyncSync(output);
+    } finally {
+      fs.closeSync(output);
+    }
+  } finally {
+    fs.closeSync(input);
+  }
+}
+
+/** Recursive copy of regular files and directories only; symlinks and special files are skipped and counted. */
+function copyPrivateTree(source: string, target: string): number {
+  privateDir(target);
+  let skipped = 0;
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) skipped += copyPrivateTree(from, to);
+    else if (entry.isFile()) copyPrivateFile(from, to);
+    else skipped += 1;
+  }
+  return skipped;
+}
+
 function sha256File(file: string): string {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
@@ -56,10 +132,21 @@ function directoryStats(dir: string): { files: number; bytes: number } {
   let bytes = 0;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) {
     if (!entry.isFile()) continue;
+    if (!isRealDirectoryPath(dir, entry.parentPath)) continue;
     files += 1;
     bytes += fs.statSync(path.join(entry.parentPath, entry.name)).size;
   }
   return { files, bytes };
+}
+
+/** True unless the path lies below a symlinked directory (which copies skip). */
+function isRealDirectoryPath(root: string, dir: string): boolean {
+  let current = dir;
+  while (current.length > root.length) {
+    if (fs.lstatSync(current).isSymbolicLink()) return false;
+    current = path.dirname(current);
+  }
+  return true;
 }
 
 function readSchemaVersion(dbPath: string): number | null {
@@ -77,7 +164,9 @@ function readSchemaVersion(dbPath: string): number | null {
 /**
  * Inventory (dry run) or copy (execute) of all Claudio state. SQLite is
  * copied with VACUUM INTO, which produces a consistent snapshot even while
- * WAL is in use; other files are copied as-is. Never reads .env.
+ * WAL is in use; other files are copied byte for byte. Never reads .env.
+ * The backup holds sessions and profile data: every directory in it is 0700
+ * and every file 0600 from the moment it is created. A dry run touches nothing.
  */
 export function backupState(
   locations: StateLocations,
@@ -85,10 +174,7 @@ export function backupState(
   options: { execute: boolean; appVersion?: string | null; gitCommit?: string | null; now?: Date }
 ): BackupManifest {
   const entries: ManifestEntry[] = [];
-  if (options.execute) {
-    if (fs.existsSync(outDir) && fs.readdirSync(outDir).length > 0) throw new Error(`backup target ${outDir} is not empty`);
-    fs.mkdirSync(outDir, { recursive: true });
-  }
+  if (options.execute) prepareRoot(outDir);
 
   const dbPath = path.join(locations.dataDir, "radio.sqlite");
   let sqliteSchemaVersion: number | null = null;
@@ -98,7 +184,9 @@ export function backupState(
     let sha256: string | undefined;
     let bytes: number | undefined;
     if (options.execute) {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
+      privateDir(path.dirname(target));
+      // VACUUM INTO accepts an existing empty file and keeps its mode, so the copy is never wider than 0600.
+      fs.closeSync(fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, PRIVATE_FILE));
       const source = new DatabaseSync(dbPath);
       try {
         source.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
@@ -131,8 +219,8 @@ export function backupState(
     if (!fs.existsSync(source)) continue;
     const target = path.join(outDir, "data", item.name);
     if (options.execute) {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(source, target);
+      privateDir(path.dirname(target));
+      copyPrivateFile(source, target);
     }
     entries.push({ kind: "file", role: item.role, source, target, sensitive: item.sensitive, format: item.format, bytes: fs.statSync(source).size, sha256: sha256File(source) });
   }
@@ -152,8 +240,17 @@ export function backupState(
   }
   for (const dir of dirs) {
     if (!fs.existsSync(dir.source)) continue;
-    if (options.execute) fs.cpSync(dir.source, dir.target, { recursive: true });
-    entries.push({ kind: "directory", role: dir.role, source: dir.source, target: dir.target, sensitive: dir.sensitive, format: dir.format, ...directoryStats(dir.source) });
+    const skipped = options.execute ? copyPrivateTree(dir.source, dir.target) : 0;
+    entries.push({
+      kind: "directory",
+      role: dir.role,
+      source: dir.source,
+      target: dir.target,
+      sensitive: dir.sensitive,
+      format: dir.format,
+      ...directoryStats(dir.source),
+      ...(skipped > 0 ? { skipped } : {})
+    });
   }
 
   const manifest: BackupManifest = {
@@ -173,6 +270,6 @@ export function backupState(
       "Run PRAGMA integrity_check on the restored radio.sqlite before serving traffic."
     ]
   };
-  if (options.execute) fs.writeFileSync(path.join(outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  if (options.execute) fs.writeFileSync(path.join(outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: PRIVATE_FILE, flag: "wx" });
   return manifest;
 }

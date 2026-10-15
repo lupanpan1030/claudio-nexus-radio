@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { LocalServiceStarter } from "./adapters/runtime/local-service.js";
 
 export type KuGouSong = {
   title: string;
@@ -74,11 +75,6 @@ type KuGouSession = {
 };
 
 let runtimeSession: KuGouSession | null | undefined;
-let autoStartPromise: Promise<boolean> | null = null;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function isLocalKuGouBase() {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(apiBase());
@@ -89,7 +85,7 @@ function bundledApiEntrypoint() {
   return fs.existsSync(appJs) ? appJs : "";
 }
 
-async function canReachLocalKuGouApi() {
+async function canReachLocalKuGouApi(signal: AbortSignal = AbortSignal.timeout(2500)) {
   if (!isLocalKuGouBase()) return false;
   try {
     const url = new URL(`${apiBase()}/search/complex`);
@@ -99,31 +95,27 @@ async function canReachLocalKuGouApi() {
     const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(2500)
+      signal: AbortSignal.any([signal, AbortSignal.timeout(2500)])
     });
+    void response.body?.cancel();
     return response.ok;
   } catch {
     return false;
   }
 }
 
-async function ensureBundledLocalKuGouApi() {
-  if (!config.kugouApiAutostart) return false;
-  if (!isLocalKuGouBase()) return false;
-  if (await canReachLocalKuGouApi()) return true;
-  if (autoStartPromise) return autoStartPromise;
+function launchBundledKuGouApi(): boolean {
+  const entry = bundledApiEntrypoint();
+  if (!entry) return false;
 
-  autoStartPromise = (async () => {
-    const entry = bundledApiEntrypoint();
-    if (!entry) return false;
+  fs.mkdirSync(bundledApiDir, { recursive: true });
+  const out = fs.openSync(bundledApiLogPath, "a");
+  const err = fs.openSync(bundledApiErrLogPath, "a");
+  const base = new URL(apiBase());
+  const host = base.hostname || "127.0.0.1";
+  const port = base.port || (base.protocol === "https:" ? "443" : "80");
 
-    fs.mkdirSync(bundledApiDir, { recursive: true });
-    const out = fs.openSync(bundledApiLogPath, "a");
-    const err = fs.openSync(bundledApiErrLogPath, "a");
-    const base = new URL(apiBase());
-    const host = base.hostname || "127.0.0.1";
-    const port = base.port || (base.protocol === "https:" ? "443" : "80");
-
+  try {
     const child = spawn(process.execPath, [entry], {
       cwd: bundledApiDir,
       detached: true,
@@ -137,20 +129,29 @@ async function ensureBundledLocalKuGouApi() {
       }
     });
     child.unref();
-
-    const deadline = Date.now() + localApiBootDeadlineMs;
-    while (Date.now() < deadline) {
-      if (await canReachLocalKuGouApi()) return true;
-      await sleep(500);
-    }
-    return false;
-  })();
-
-  try {
-    return await autoStartPromise;
   } finally {
-    autoStartPromise = null;
+    fs.closeSync(out);
+    fs.closeSync(err);
   }
+  return true;
+}
+
+/**
+ * The one starter for the bundled KuGou API, shared by legacy routes and the
+ * v1 KuGou client: honours KUGOU_API_AUTOSTART, only for a local base URL,
+ * one launch per attempt and every attempt bounded. Creating it starts nothing.
+ */
+export const bundledKuGouApi = new LocalServiceStarter({
+  enabled: config.kugouApiAutostart && isLocalKuGouBase(),
+  probe: canReachLocalKuGouApi,
+  launch: launchBundledKuGouApi,
+  bootDeadlineMs: localApiBootDeadlineMs,
+  pollMs: 500,
+  retryAfterMs: 30_000
+});
+
+function ensureBundledLocalKuGouApi() {
+  return bundledKuGouApi.ensure(AbortSignal.timeout(localApiBootDeadlineMs + 3000)).catch(() => false);
 }
 
 function readSession() {

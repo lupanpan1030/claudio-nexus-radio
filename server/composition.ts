@@ -100,7 +100,12 @@ export async function createServices(env: NodeJS.ProcessEnv = process.env): Prom
 
   const settings = readPlaybackSettings(env);
   const rows = new TrackRowReader(db.db);
-  const kugouClient = new KuGouClient({ baseUrl: config.kugouApiBaseUrl, credentials: kugou.getKuGouSessionCredentials });
+  const kugouClient = new KuGouClient({
+    baseUrl: config.kugouApiBaseUrl,
+    credentials: kugou.getKuGouSessionCredentials,
+    // Same starter as the legacy routes: KUGOU_API_AUTOSTART decides, disabled never launches.
+    ensureReady: (signal) => kugou.bundledKuGouApi.ensure(signal)
+  });
   const providers: ProviderModule[] = [
     {
       providerId: LOCAL_PROVIDER,

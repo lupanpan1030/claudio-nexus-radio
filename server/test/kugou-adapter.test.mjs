@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import test, { after, before } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import vm from "node:vm";
+import zlib from "node:zlib";
 import { KuGouClient } from "../adapters/kugou/client.ts";
 import { KuGouLyrics, KuGouMediaSource } from "../adapters/kugou/kugou-source.ts";
 import { runMigrations } from "../adapters/sqlite/migrations.ts";
@@ -11,7 +16,9 @@ import { makeWav } from "../testing/wav.ts";
 // A local stand-in for the KuGouMusicApi service: no real account, no real endpoint.
 const HASH = "0123456789ABCDEF0123456789ABCDEF";
 const SEARCHED = "FEDCBA9876543210FEDCBA9876543210";
+const OTHER = "00112233445566778899AABBCCDDEEFF";
 const audio = makeWav(1500, { seed: 6 });
+// `hash` in the URL body is not a field the bundled API documents; it is served to prove it is ignored.
 const upstream = { servedHash: HASH, urlCalls: 0, audioStatus: 200, requests: [] };
 let server;
 let base;
@@ -29,7 +36,7 @@ before(async () => {
       if (url.searchParams.get("quality") === "320") return json({ status: 0, error_code: 2 });
       return json({ status: 1, url: [`${base}/audio/${url.searchParams.get("hash")}?sig=${upstream.urlCalls}`], hash: upstream.servedHash });
     }
-    if (url.pathname === "/search/lyric") return json({ candidates: [{ id: 77, accesskey: "AK", duration: 1500 }] });
+    if (url.pathname === "/search/lyric") return json({ candidates: [{ id: 77, accesskey: "AK", duration: 200_000 }] });
     if (url.pathname === "/lyric") {
       return json(url.searchParams.get("fmt") === "krc" ? { decodeContent: "[1000,800]<0,400,0>新<400,400,0>歌\n" } : {});
     }
@@ -65,12 +72,17 @@ function build({ credentials = null, searchHits = [] } = {}) {
   );
   insert.run("kg-hash", "Song", "Artist", `kugou://${HASH}`);
   insert.run("kg-name", "Named", "Singer", `kugou://${encodeURIComponent("Singer\nNamed")}`);
-  const state = { credentials };
+  // The same KuGou recording synced under a second catalog entry (e.g. another playlist import).
+  insert.run("kg-hash-dup", "Song (live list)", "Artist", `kugou://${HASH.toLowerCase()}`);
+  const state = { credentials, searchHits, searches: 0 };
   const client = new KuGouClient({ baseUrl: base, credentials: () => state.credentials });
   const source = new KuGouMediaSource({
     rows: new TrackRowReader(db),
     client,
-    search: async () => searchHits,
+    search: async () => {
+      state.searches += 1;
+      return state.searchHits;
+    },
     score: (wanted, hit) => (hit.title === wanted.title && hit.artist === wanted.artist ? 100 : 10),
     urlTtlMs: 60_000,
     clock: { now: () => 1_000 }
@@ -89,13 +101,44 @@ test("the synced hash is the recording; refreshing the signed URL keeps the revi
   assert.match(first.sourceRevision, /^kg-[0-9a-f]{40}$/);
   assert.equal(first.expiresAt, 61_000);
   assert.deepEqual(first.duration, { kind: "unknown" }, "no unverified length field is trusted");
+  assert.equal("servedHash" in first.binding, false);
   const refreshed = await source.resolve(ref("kg-hash"), ctx({ sourceRevision: first.sourceRevision, binding: first.binding }));
   assert.notEqual(refreshed.binding.url, first.binding.url, "a new signed URL");
   assert.equal(refreshed.sourceRevision, first.sourceRevision);
   upstream.servedHash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-  const other = await source.resolve(ref("kg-hash"), ctx({ sourceRevision: first.sourceRevision, binding: first.binding }));
-  assert.notEqual(other.sourceRevision, first.sourceRevision, "a different served file is a different revision");
+  const undocumented = await source.resolve(ref("kg-hash"), ctx({ sourceRevision: first.sourceRevision, binding: first.binding }));
+  assert.equal(undocumented.sourceRevision, first.sourceRevision, "an undocumented body field cannot move the revision");
   upstream.servedHash = HASH;
+});
+
+test("one KuGou hash under two catalog entries shares the recording but not the revision", async () => {
+  const { source } = build();
+  const a = await source.resolve(ref("kg-hash"), ctx());
+  const b = await source.resolve(ref("kg-hash-dup"), ctx());
+  assert.equal(a.recording.recordingId, b.recording.recordingId);
+  assert.notEqual(a.sourceRevision, b.sourceRevision);
+  const again = await source.resolve(ref("kg-hash-dup"), ctx({ sourceRevision: b.sourceRevision, binding: b.binding }));
+  assert.equal(again.sourceRevision, b.sourceRevision);
+});
+
+test("a searched hash is an unverified catalog match, yet refreshing that same hash keeps the revision without searching", async () => {
+  const fx = build({ searchHits: [{ title: "Named", artist: "Singer", hash: SEARCHED }] });
+  const first = await fx.source.resolve(ref("kg-name"), ctx());
+  assert.deepEqual(first.recording, { recordingId: `kugou:${SEARCHED}`, confidence: "unverified" });
+  assert.equal(fx.state.searches, 1);
+  // The catalog search would now pick another recording with the very same title: a refresh must not follow it.
+  fx.state.searchHits = [{ title: "Named", artist: "Singer", hash: OTHER }];
+  const refreshed = await fx.source.resolve(ref("kg-name"), ctx({ sourceRevision: first.sourceRevision, binding: first.binding }));
+  assert.equal(fx.state.searches, 1, "a refresh reuses the bound hash");
+  assert.equal(refreshed.sourceRevision, first.sourceRevision);
+  assert.equal(refreshed.recording.recordingId, first.recording.recordingId);
+  assert.notEqual(refreshed.binding.url, first.binding.url);
+  const urlRequest = upstream.requests.filter((item) => item.path === "/song/url").at(-1);
+  assert.equal(urlRequest.query.hash, SEARCHED);
+  // A fresh resolution that lands on a different hash is a different recording, title notwithstanding.
+  const fresh = await fx.source.resolve(ref("kg-name"), ctx());
+  assert.equal(fresh.recording.recordingId, `kugou:${OTHER}`);
+  assert.notEqual(fresh.sourceRevision, first.sourceRevision);
 });
 
 test("streams proxy exactly the bound URL with Range; failures and account changes never fall back", async () => {
@@ -126,17 +169,16 @@ test("a row without a hash can only be matched by search, and is marked unverifi
   await assert.rejects(weak.source.resolve(ref("kg-name"), ctx()), (error) => error.info.code === "kugou_no_match");
 });
 
-test("lyrics are looked up by the bound hash only, keep provider word timing, and refuse a duration mismatch", async () => {
+test("lyrics are looked up by the bound hash only and keep provider word timing; undocumented durations are not compared", async () => {
   const { source, lyrics } = build();
   const resolved = await source.resolve(ref("kg-hash"), ctx());
-  const lookup = { recording: resolved.recording, sourceRevision: resolved.sourceRevision, duration: { kind: "unknown" }, binding: resolved.binding };
+  const lookup = { recording: resolved.recording, sourceRevision: resolved.sourceRevision, duration: { kind: "known", ms: 1500, source: "media-element" }, binding: resolved.binding };
   const raw = await lyrics.fetch(lookup, { signal: new AbortController().signal });
   assert.deepEqual(raw, { kind: "text", format: "krc", text: "[1000,800]<0,400,0>新<400,400,0>歌\n", documentKey: "kugou-lyric:77:krc" });
   const search = upstream.requests.filter((item) => item.path === "/search/lyric").at(-1);
   assert.equal(search.query.hash, HASH);
   assert.equal(search.query.keywords, undefined, "never searched by title");
-  const mismatch = await lyrics.fetch({ ...lookup, duration: { kind: "known", ms: 200_000, source: "media-element" } }, { signal: new AbortController().signal });
-  assert.deepEqual(mismatch, { kind: "unmatched" });
+  assert.equal(search.query.duration, undefined, "no length of unknown unit is sent");
 });
 
 test("login-required responses are classified for the caller", async () => {

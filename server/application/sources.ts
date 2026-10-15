@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   asId,
   type QueueItemId,
@@ -159,6 +159,20 @@ export class StreamAccess {
   describe(token: string): StreamHandleRecord | null {
     return this.deps.handles.get(token);
   }
+}
+
+/**
+ * A source revision scoped to one TrackRef: `evidence` identifies the
+ * recording as served (content hash, provider hash...). Same ref + same
+ * evidence → same revision; the same recording under another ref → another
+ * revision, so revisions never collide across catalog entries.
+ */
+export function refScopedRevision(prefix: string, ref: TrackRef, evidence: readonly string[]): SourceRevision {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([ref.providerId, ref.mediaId, ...evidence]))
+    .digest("hex")
+    .slice(0, 40);
+  return asId<SourceRevision>(`${prefix}${digest}`);
 }
 
 export function sameRef(a: TrackRef, b: TrackRef): boolean {

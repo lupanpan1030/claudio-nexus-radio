@@ -15,7 +15,13 @@ export type SourceBinding = Readonly<Record<string, unknown>>;
 
 export interface ResolvedSource {
   readonly recording: RecordingIdentity;
-  /** Must change whenever the recording changes or cannot be proven identical. */
+  /**
+   * Names one recording as served for one TrackRef. Stable while a refresh
+   * (e.g. a new signed URL) provably serves the same recording; must change
+   * whenever the recording changes or continuity cannot be proven. It is
+   * scoped to the ref: the same recording under two refs keeps one shared
+   * recordingId but gets two revisions, so a revision never names two refs.
+   */
   readonly sourceRevision: SourceRevision;
   readonly duration: DurationInfo;
   readonly capabilities: MediaCapabilities;

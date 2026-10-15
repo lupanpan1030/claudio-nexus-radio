@@ -148,8 +148,9 @@ export interface ResolvedSourceStore {
 }
 
 export interface LyricsAssetStore {
-  get(sourceRevision: SourceRevision): LyricsAvailability | null;
-  put(sourceRevision: SourceRevision, result: LyricsAvailability, at: number): void;
+  /** Null when absent or produced by another parser version (callers re-derive it). */
+  get(sourceRevision: SourceRevision, parserVersion: number): LyricsAvailability | null;
+  put(sourceRevision: SourceRevision, result: LyricsAvailability, at: number, parserVersion: number): void;
 }
 
 export interface StartedFact {

@@ -1,13 +1,8 @@
-import { createHash } from "node:crypto";
-import {
-  asId,
-  type RecordingConfidence,
-  type RecordingId,
-  type SourceRevision,
-  type TrackRef
-} from "@claudio/contracts";
+import { asId, type RecordingConfidence, type RecordingId, type TrackRef } from "@claudio/contracts";
 import { appError, isAbort, throwIfAborted } from "../../application/errors.js";
+import { detectLyricsFormat, parseLyricsDocument } from "../../application/lyrics/parse.js";
 import { raceAbort } from "../../application/operations.js";
+import { refScopedRevision } from "../../application/sources.js";
 import type { LyricsLookup, LyricsSourcePort, RawLyrics } from "../../ports/lyrics.js";
 import type { MediaSourcePort, MediaStream, ResolveContext, ResolvedSource, SourceBinding, StreamRequest } from "../../ports/media-source.js";
 import type { Clock } from "../../ports/runtime.js";
@@ -25,8 +20,6 @@ export interface KuGouSearchHit {
 interface KuGouBinding {
   /** The hash this catalog entry resolved to (the recording). */
   readonly hash: string;
-  /** File hash the URL endpoint reported, when it reported one. */
-  readonly servedHash: string | null;
   readonly url: string;
   readonly confidence: RecordingConfidence;
   readonly accountRevision: string | null;
@@ -69,21 +62,15 @@ export function extractAudioUrl(value: unknown, depth = 0): string {
   return "";
 }
 
-function reportedHash(body: unknown): string | null {
-  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : {};
-  for (const value of [record.hash, data.hash]) {
-    if (typeof value === "string" && HASH.test(value)) return value.toUpperCase();
-  }
-  return null;
-}
-
 /**
- * KuGou playback. The recording is the resolved hash; the URL endpoint's
- * reported file hash also enters the revision. Refreshing a signed URL for
- * the same hash keeps the revision; a different hash is a new revision.
- * Streams are proxied with the caller's Range and never fall back to
- * another recording or to a local file.
+ * KuGou playback. The recording is the resolved hash; the revision is that
+ * hash scoped to the catalog ref. A refresh re-requests a URL for the bound
+ * hash only (never a new search), so a new signed URL keeps the revision and
+ * a different hash is a new revision. The bundled KuGouMusicApi /song/url
+ * passes the tracker body through without a documented file-hash or length
+ * field, so neither is read: duration stays unknown. Streams are proxied
+ * with the caller's Range and never fall back to another recording or to a
+ * local file.
  */
 export class KuGouMediaSource implements MediaSourcePort {
   constructor(
@@ -105,13 +92,11 @@ export class KuGouMediaSource implements MediaSourcePort {
 
     const previous = context.previous ? readBinding(context.previous.binding) : null;
     const target = previous ? { hash: previous.hash, confidence: previous.confidence } : await this.locate(row, context.signal);
-    const { url, servedHash } = await this.fetchUrl(target.hash, context.signal);
+    const url = await this.fetchUrl(target.hash, context.signal);
     const recordingHash = target.hash.toUpperCase();
-    const revision = createHash("sha256").update(`${recordingHash}|${servedHash ?? recordingHash}`).digest("hex").slice(0, 40);
     const now = this.deps.clock.now();
     const binding: KuGouBinding = {
       hash: recordingHash,
-      servedHash,
       url,
       confidence: target.confidence,
       accountRevision: this.deps.client.accountRevision(),
@@ -119,8 +104,7 @@ export class KuGouMediaSource implements MediaSourcePort {
     };
     return {
       recording: { recordingId: asId<RecordingId>(`kugou:${recordingHash}`), confidence: target.confidence },
-      sourceRevision: asId<SourceRevision>(`kg-${revision}`),
-      // The URL endpoint's length fields are not verified against the real service: leave unknown.
+      sourceRevision: refScopedRevision("kg-", ref, [recordingHash]),
       duration: { kind: "unknown" },
       capabilities: { seekable: true, rangeRequests: true },
       expiresAt: now + this.deps.urlTtlMs,
@@ -131,7 +115,8 @@ export class KuGouMediaSource implements MediaSourcePort {
   private async locate(row: TrackRow, signal: AbortSignal): Promise<{ hash: string; confidence: RecordingConfidence }> {
     const key = row.filePath.startsWith("kugou://") ? safeDecode(row.filePath.slice("kugou://".length)) : "";
     if (HASH.test(key)) return { hash: key, confidence: "provider-asserted" };
-    // Synced without a hash: a title/artist search can find *a* recording, never prove it is the same one.
+    // Synced without a hash: a title/artist search can find *a* recording, never prove it is the one the
+    // catalog meant (confidence "unverified"). Once found, the hash itself is the recording: refreshes reuse it.
     const hits = await raceAbort(Promise.resolve(this.deps.search(`${row.artist} ${row.title}`.trim(), 6)), signal);
     const minimum = row.artist.trim() ? 85 : 70;
     const best = hits
@@ -142,7 +127,7 @@ export class KuGouMediaSource implements MediaSourcePort {
     return { hash: best.hit.hash!, confidence: "unverified" };
   }
 
-  private async fetchUrl(hash: string, signal: AbortSignal): Promise<{ url: string; servedHash: string | null }> {
+  private async fetchUrl(hash: string, signal: AbortSignal): Promise<string> {
     const requests = [
       { pathname: "/song/url", params: { hash, quality: 320 } },
       { pathname: "/song/url", params: { hash, quality: 128 } },
@@ -156,7 +141,7 @@ export class KuGouMediaSource implements MediaSourcePort {
         try {
           const body = await this.deps.client.get(request.pathname, request.params, { auth, signal });
           const url = extractAudioUrl(body);
-          if (url) return { url, servedHash: reportedHash(body) };
+          if (url) return url;
         } catch (error) {
           if (isAbort(error) || signal.aborted) throw error;
           lastError = error;
@@ -203,54 +188,53 @@ export class KuGouMediaSource implements MediaSourcePort {
 }
 
 /**
- * Lyrics through the KuGouMusicApi /search/lyric → /lyric chain, keyed only
- * by the bound recording hash (never by title). Endpoint names follow the
- * KuGouMusicApi docs and Folia's provider; not verified against the bundled
- * service on this machine.
+ * Lyrics through the bundled KuGouMusicApi /search/lyric → /lyric chain,
+ * keyed only by the bound recording hash (never by title or a served-file
+ * hash). Checked against upstream KuGouMusicApi 06560e3e: /lyric?decode=true
+ * adds `decodeContent`, which is KRC only when the document's `contenttype`
+ * is 0 and otherwise the base64-decoded text regardless of the requested
+ * fmt — so the format is taken from the content and the document must
+ * parse as that format before it is accepted. The candidate list is the
+ * lyrics service's own body passed through (`candidates[].id/accesskey`);
+ * its duration unit is not documented, so durations are not compared.
  */
 export class KuGouLyrics implements LyricsSourcePort {
-  constructor(private readonly client: KuGouClient, private readonly durationToleranceMs = 3000) {}
+  constructor(private readonly client: KuGouClient) {}
 
   async fetch(lookup: LyricsLookup, options: { readonly signal: AbortSignal }): Promise<RawLyrics> {
     const binding = readBinding(lookup.binding);
-    const hash = binding.servedHash ?? binding.hash;
-    const searched = await this.client.get("/search/lyric", { hash, man: "no" }, { auth: false, signal: options.signal });
-    const candidates = candidateList(searched);
-    const candidate = candidates.find((item) => item.id && item.accesskey);
+    const searched = await this.client.get("/search/lyric", { hash: binding.hash, man: "no" }, { auth: false, signal: options.signal });
+    const candidate = candidateList(searched).find((item) => item.id && item.accesskey);
     if (!candidate) return { kind: "missing", reason: "not-found" };
-    const known = lookup.duration.kind === "known" ? lookup.duration.ms : null;
-    if (known !== null && candidate.durationMs !== null && Math.abs(candidate.durationMs - known) > this.durationToleranceMs) {
-      return { kind: "unmatched" };
-    }
     for (const fmt of ["krc", "lrc"] as const) {
       const body = await this.client.get("/lyric", { id: candidate.id, accesskey: candidate.accesskey, fmt, decode: true }, { auth: false, signal: options.signal });
       const text = decodedText(body);
-      if (text.trim()) return { kind: "text", format: fmt, text, documentKey: `kugou-lyric:${candidate.id}:${fmt}` };
+      const format = detectLyricsFormat(text);
+      // Unrecognised or unparseable content is not accepted under any label.
+      if (!format || !parseLyricsDocument(format, text)) continue;
+      return { kind: "text", format, text, documentKey: `kugou-lyric:${candidate.id}:${format}` };
     }
     return { kind: "missing", reason: "not-found" };
   }
 }
 
-function candidateList(body: unknown): { id: string; accesskey: string; durationMs: number | null }[] {
+function candidateList(body: unknown): { id: string; accesskey: string }[] {
   const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : {};
   const list = Array.isArray(record.candidates) ? record.candidates : Array.isArray(data.candidates) ? data.candidates : [];
   return list.map((item) => {
     const entry = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-    const duration = Number(entry.duration);
     return {
-      id: entry.id === undefined ? "" : String(entry.id),
-      accesskey: typeof entry.accesskey === "string" ? entry.accesskey : "",
-      durationMs: Number.isFinite(duration) && duration > 0 ? duration : null
+      id: typeof entry.id === "string" || typeof entry.id === "number" ? String(entry.id) : "",
+      accesskey: typeof entry.accesskey === "string" ? entry.accesskey : ""
     };
   });
 }
 
 function decodedText(body: unknown): string {
   const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : {};
-  const value = record.decodeContent ?? data.decodeContent;
-  return typeof value === "string" ? value : "";
+  const value = record.decodeContent;
+  return typeof value === "string" ? value.replace(/^\uFEFF/, "") : "";
 }
 
 function safeDecode(value: string): string {

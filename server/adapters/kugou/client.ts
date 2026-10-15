@@ -34,6 +34,12 @@ export class KuGouClient {
       readonly baseUrl: string;
       readonly credentials: () => KuGouCredentials | null;
       readonly fetch?: typeof fetch;
+      /**
+       * Called once when the service cannot be reached (connection-level
+       * failure): may start a local service and resolves true when it is ready,
+       * after which the request is sent once more. Must honour the signal.
+       */
+      readonly ensureReady?: (signal: AbortSignal) => Promise<boolean>;
     }
   ) {}
 
@@ -55,18 +61,24 @@ export class KuGouClient {
     }
     const credentials = options.auth ? this.deps.credentials() : null;
     if (options.auth && !credentials) throw appError("auth-required", "kugou_login_required");
-    const doFetch = this.deps.fetch ?? fetch;
+    const headers = { Accept: "application/json", ...(credentials ? { Cookie: credentials.cookie, Authorization: credentials.cookie } : {}) };
     let response: Response;
+    try {
+      response = await this.connect(url, headers, options.signal);
+    } catch (error) {
+      if (options.signal.aborted || !this.deps.ensureReady) throw unreachable(error, options.signal);
+      if (!(await this.deps.ensureReady(options.signal))) throw unreachable(error, options.signal);
+      try {
+        response = await this.connect(url, headers, options.signal);
+      } catch (retryError) {
+        throw unreachable(retryError, options.signal);
+      }
+    }
     let text: string;
     try {
-      response = await doFetch(url, {
-        headers: { Accept: "application/json", ...(credentials ? { Cookie: credentials.cookie, Authorization: credentials.cookie } : {}) },
-        signal: options.signal
-      });
       text = await response.text();
     } catch (error) {
-      if (options.signal.aborted) throw error;
-      throw appError("retryable", "kugou_unreachable", error instanceof Error ? error.message : "KuGou API unreachable", error);
+      throw unreachable(error, options.signal);
     }
     const body = parseKuGouBody(text);
     if (LOGIN_CODES.test(text)) throw appError("auth-required", "kugou_login_required");
@@ -75,4 +87,14 @@ export class KuGouClient {
     }
     return body;
   }
+
+  /** Connection and response headers only: a rejection here means the service was not reached. */
+  private connect(url: URL, headers: Record<string, string>, signal: AbortSignal): Promise<Response> {
+    return (this.deps.fetch ?? fetch)(url, { headers, signal });
+  }
+}
+
+function unreachable(error: unknown, signal: AbortSignal): unknown {
+  if (signal.aborted) return error;
+  return appError("retryable", "kugou_unreachable", error instanceof Error ? error.message : "KuGou API unreachable", error);
 }

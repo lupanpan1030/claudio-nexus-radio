@@ -371,18 +371,21 @@ export class SqliteResolvedSourceStore implements ResolvedSourceStore {
 export class SqliteLyricsAssetStore implements LyricsAssetStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  get(sourceRevision: SourceRevision): LyricsAvailability | null {
-    const row = this.db.prepare("SELECT availability_json FROM lyrics_assets WHERE source_revision = ?").get(sourceRevision) as Row | undefined;
+  get(sourceRevision: SourceRevision, parserVersion: number): LyricsAvailability | null {
+    const row = this.db
+      .prepare("SELECT availability_json FROM lyrics_assets WHERE source_revision = ? AND parser_version = ?")
+      .get(sourceRevision, parserVersion) as Row | undefined;
     return row ? parse<LyricsAvailability>(row.availability_json) : null;
   }
 
-  put(sourceRevision: SourceRevision, result: LyricsAvailability, at: number): void {
+  put(sourceRevision: SourceRevision, result: LyricsAvailability, at: number, parserVersion: number): void {
     this.db
       .prepare(
-        `INSERT INTO lyrics_assets (source_revision, availability_json, created_at) VALUES (?, ?, ?)
-         ON CONFLICT(source_revision) DO UPDATE SET availability_json = excluded.availability_json, created_at = excluded.created_at`
+        `INSERT INTO lyrics_assets (source_revision, availability_json, created_at, parser_version) VALUES (?, ?, ?, ?)
+         ON CONFLICT(source_revision) DO UPDATE SET availability_json = excluded.availability_json, created_at = excluded.created_at,
+           parser_version = excluded.parser_version`
       )
-      .run(sourceRevision, json(result), at);
+      .run(sourceRevision, json(result), at, parserVersion);
   }
 }
 
