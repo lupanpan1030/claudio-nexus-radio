@@ -4,7 +4,7 @@ import type { PlaybackPolicy } from "./application/policy.js";
 import { FishSpeechSynthesis } from "./adapters/fish/fish-tts.js";
 import { KuGouClient } from "./adapters/kugou/client.js";
 import { KuGouLyrics, KuGouMediaSource } from "./adapters/kugou/kugou-source.js";
-import { LegacyModelScriptWriter, LegacyRulesRadioCandidates, type LegacyDjTrack } from "./adapters/legacy/legacy-planning.js";
+import { LegacyModelScriptWriter, LegacyRulesRadioCandidates, type LegacyDjLineGenerator, type LegacyDjTrack } from "./adapters/legacy/legacy-planning.js";
 import { LocalFingerprints, LocalMediaSource, LocalSidecarLyrics } from "./adapters/local/local-source.js";
 import { LegacyTrackCatalog, TrackRowReader } from "./adapters/sqlite/track-catalog.js";
 import type { AppDeps } from "./http/app.js";
@@ -46,6 +46,24 @@ function promptOnlyTrack(track: LegacyDjTrack): Track {
     size: 0,
     addedAt: ""
   };
+}
+
+/**
+ * The v1 writer's line generator: the legacy model-first DJ writer, always in
+ * dry-run, told about the track by its legacy row when there is one and by
+ * catalog metadata otherwise.
+ */
+export function legacyDjLineGenerator(deps: {
+  readonly getTrack: (legacyTrackId: string) => Track | undefined;
+  readonly generate: typeof import("./dj.js").generateDjLineForTrack;
+}): LegacyDjLineGenerator {
+  return (input) =>
+    deps.generate({
+      track: (input.track.legacyTrackId ? deps.getTrack(input.track.legacyTrackId) : undefined) ?? promptOnlyTrack(input.track),
+      handover: input.handover,
+      dryRun: true,
+      signal: input.signal
+    });
 }
 
 export interface PlaybackSettings {
@@ -159,16 +177,7 @@ export async function createServices(env: NodeJS.ProcessEnv = process.env): Prom
     db: db.db,
     providers,
     radio: new LegacyRulesRadioCandidates({ choose: radio.chooseRadioCandidate, toLegacyId, describeLegacy }),
-    writer: new LegacyModelScriptWriter(
-      (input) =>
-        dj.generateDjLineForTrack({
-          track: (input.track.legacyTrackId ? db.getTrack(input.track.legacyTrackId) : undefined) ?? promptOnlyTrack(input.track),
-          handover: input.handover,
-          dryRun: true,
-          signal: input.signal
-        }),
-      llm.hasLlm
-    ),
+    writer: new LegacyModelScriptWriter(legacyDjLineGenerator({ getTrack: db.getTrack, generate: dj.generateDjLineForTrack }), llm.hasLlm),
     tts: new FishSpeechSynthesis({
       apiKey: config.fishTtsKey,
       endpoint: config.fishTtsEndpoint,
