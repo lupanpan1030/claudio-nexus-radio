@@ -158,15 +158,22 @@ export interface ResolvedSourceRecord {
   readonly bindingScrubbedAt: number | null;
 }
 
+/** Position in the scrub scan order: the last record examined. */
+export interface ScrubCursor {
+  readonly lastSeenAt: number;
+  readonly sourceRevision: SourceRevision;
+}
+
 export interface ResolvedSourceStore {
   /** A new resolution replaces the binding and clears any earlier scrub. */
   upsert(record: Omit<ResolvedSourceRecord, "bindingScrubbedAt">): void;
   get(sourceRevision: SourceRevision): ResolvedSourceRecord | null;
   /**
    * Unscrubbed records whose binding expired before `before` (records without
-   * a deadline count from lastSeenAt + fallbackTtlMs), oldest first.
+   * a deadline count from lastSeenAt + fallbackTtlMs), ordered by
+   * (lastSeenAt, sourceRevision); only those after `after` when it is given.
    */
-  listScrubbable(before: number, fallbackTtlMs: number, limit: number): readonly ResolvedSourceRecord[];
+  listScrubbable(before: number, fallbackTtlMs: number, limit: number, after?: ScrubCursor | null): readonly ResolvedSourceRecord[];
   /** Replaces the binding with its scrubbed form, only if it is still the one that was read. */
   markScrubbed(sourceRevision: SourceRevision, expectedLastSeenAt: number, binding: SourceBinding, at: number): boolean;
 }

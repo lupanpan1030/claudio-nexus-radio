@@ -1,7 +1,7 @@
 import { asId, type QueueItemId, type TrackRef } from "@claudio/contracts";
 import type { ProviderRegistry } from "../ports/providers.js";
 import type { Clock } from "../ports/runtime.js";
-import type { CueStore, PreparationStore, ReservationStore, ResolvedSourceStore, StreamHandleStore } from "../ports/stores.js";
+import type { CueStore, PreparationStore, ReservationStore, ResolvedSourceStore, ScrubCursor, StreamHandleStore } from "../ports/stores.js";
 import type { VoiceService } from "./narration/voice-service.js";
 import type { NowService } from "./now/now-service.js";
 import type { PlaybackPolicy } from "./policy.js";
@@ -17,7 +17,11 @@ export interface GcReport {
   readonly scrubbedBindings: number;
 }
 
-/** Bindings examined per GC run; the rest wait for the next run. */
+/**
+ * Bindings examined per GC run. Each run continues after the last record the
+ * previous run examined and starts over once it reaches the end, so records
+ * that stay protected cannot keep later ones from ever being examined.
+ */
 const SCRUB_BATCH = 200;
 
 /**
@@ -35,6 +39,9 @@ const SCRUB_BATCH = 200;
  * recording.
  */
 export class PlaybackGc {
+  /** In memory only: after a restart the scan starts from the oldest record again. */
+  private scrubCursor: ScrubCursor | null = null;
+
   constructor(
     private readonly deps: {
       readonly preparations: PreparationService;
@@ -73,7 +80,9 @@ export class PlaybackGc {
 
   private scrubBindings(at: number, protectedItems: ReadonlySet<string>): number {
     const { resolvedSources, handles, providers, preparationStore, policy } = this.deps;
-    const due = resolvedSources.listScrubbable(at - policy.streamGraceMs, policy.maxTtlMs, SCRUB_BATCH);
+    const due = resolvedSources.listScrubbable(at - policy.streamGraceMs, policy.maxTtlMs, SCRUB_BATCH, this.scrubCursor);
+    const last = due.at(-1);
+    this.scrubCursor = due.length === SCRUB_BATCH && last ? { lastSeenAt: last.lastSeenAt, sourceRevision: last.sourceRevision } : null;
     if (due.length === 0) return 0;
     const inUse = new Set(handles.retainedRevisions(at));
     // An expired preparation no longer carries its source value, so items are protected by their track:

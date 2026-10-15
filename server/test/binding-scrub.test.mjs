@@ -159,3 +159,91 @@ test("expired private binding data is erased unless something still uses it; ide
     await harness.close({ closeDb: true });
   }
 });
+
+test("the scrub scan moves past records that stay protected: later expired bindings are erased, protected ones kept, each run bounded", async () => {
+  const clock = new ManualClock();
+  const provider = new SignedUrlProvider("fixture-g", clock);
+  // Every resolution is a new revision, so one ref accumulates many rows.
+  const [current, victim, next, late] = ["g1", "g2", "g3", "g4"].map((id, index) => provider.add(fakeTrack(id, index + 3, { continuityUnprovable: true })));
+  const harness = await startHarness({
+    dir: fs.mkdtempSync(path.join(root, "case-")),
+    providers: [provider.module()],
+    writer: new ControlledWriter(),
+    tts: new FakeSpeech(),
+    radio: new FakeRadio(() => []),
+    clock
+  });
+  const store = harness.assembly.stores.resolvedSources;
+  const pages = [];
+  const list = store.listScrubbable.bind(store);
+  store.listScrubbable = (...args) => {
+    const page = list(...args);
+    pages.push({ limit: args[2], rows: page.length });
+    return page;
+  };
+  const resolve = async (itemId, track) => {
+    const response = await harness.request("POST", "/api/v1/playback/resolve", { protocolVersion: 1, itemId, track, preparationId: null, reason: "initial", previousRevision: null });
+    assert.equal(response.status, 200);
+    clock.advance(1);
+    return response.json.media.sourceRevision;
+  };
+  const projection = (seq, item, nextItemId) => ({
+    protocolVersion: 1,
+    executorInstanceId: "exec",
+    generation: 1,
+    seq,
+    observedAt: new Date(clock.now()).toISOString(),
+    transport: item ? "paused" : "idle",
+    item,
+    positionMs: item ? 0 : null,
+    nextItemId,
+    speaking: false
+  });
+  const signed = (revision) => Boolean(row(harness.db, revision).binding.signedUrl);
+  const run = () => {
+    const before = pages.length;
+    const report = harness.assembly.gc.run();
+    assert.equal(pages.length - before, 1, "one bounded page per run");
+    return { scrubbed: report.scrubbedBindings, examined: pages.at(-1).rows };
+  };
+  try {
+    // The oldest full page belongs to the executor's current ref; unprotected and next-item rows come after it.
+    const currentRevisions = [];
+    for (let index = 0; index < 200; index += 1) currentRevisions.push(await resolve(`cur-${index}`, current));
+    const victimRevision = await resolve("victim", victim);
+    const prepared = await harness.request("POST", "/api/v1/playback/prepare", {
+      protocolVersion: 1,
+      itemId: "item-next",
+      purpose: "program",
+      target: { kind: "track", track: next },
+      narration: null,
+      wantLyrics: false
+    });
+    const nextRevision = prepared.json.stages.source.value.sourceRevision;
+    clock.advance(1);
+    const lateRevision = await resolve("late", late);
+    const now = projection(1, { itemId: "cur-199", track: current, display: null }, "item-next");
+    assert.equal((await harness.request("PUT", "/api/v1/now", now)).status, 200);
+    clock.advance(24 * 3600_000);
+
+    assert.deepEqual(run(), { scrubbed: 0, examined: 200 }, "the first page is all protected");
+    assert.deepEqual(run(), { scrubbed: 2, examined: 3 }, "the next run continues after it instead of re-reading it");
+    assert.equal(signed(victimRevision), false);
+    assert.equal(signed(lateRevision), false);
+    assert.ok(currentRevisions.every(signed), "every revision of the current ref keeps its binding");
+    assert.ok(signed(nextRevision), "the next item keeps its binding");
+    assert.deepEqual(run(), { scrubbed: 0, examined: 200 }, "having reached the end, the scan starts over");
+    assert.deepEqual(run(), { scrubbed: 0, examined: 1 });
+    assert.ok(pages.every((page) => page.limit === 200 && page.rows <= 200));
+
+    // Once nothing references them any more, the protected rows are erased in later bounded runs.
+    assert.equal((await harness.request("PUT", "/api/v1/now", projection(2, null, null))).status, 200);
+    assert.deepEqual(run(), { scrubbed: 200, examined: 200 });
+    assert.deepEqual(run(), { scrubbed: 1, examined: 1 });
+    assert.deepEqual(run(), { scrubbed: 0, examined: 0 });
+    assert.ok(!currentRevisions.some(signed) && !signed(nextRevision));
+    assert.equal(harness.db.prepare("SELECT COUNT(*) AS n FROM playback_resolved_sources").get().n, 203, "identity rows stay");
+  } finally {
+    await harness.close({ closeDb: true });
+  }
+});

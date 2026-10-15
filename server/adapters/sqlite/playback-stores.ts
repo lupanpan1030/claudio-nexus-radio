@@ -31,6 +31,7 @@ import type {
   ReservationStore,
   ResolvedSourceRecord,
   ResolvedSourceStore,
+  ScrubCursor,
   ScriptStore,
   StartedFact,
   StartedStore,
@@ -375,14 +376,23 @@ export class SqliteResolvedSourceStore implements ResolvedSourceStore {
     return row ? toResolvedSource(row) : null;
   }
 
-  listScrubbable(before: number, fallbackTtlMs: number, limit: number): readonly ResolvedSourceRecord[] {
+  listScrubbable(before: number, fallbackTtlMs: number, limit: number, after: ScrubCursor | null = null): readonly ResolvedSourceRecord[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM playback_resolved_sources
          WHERE binding_scrubbed_at IS NULL AND COALESCE(expires_at, last_seen_at + ?) < ?
-         ORDER BY last_seen_at LIMIT ?`
+           AND (? IS NULL OR last_seen_at > ? OR (last_seen_at = ? AND source_revision > ?))
+         ORDER BY last_seen_at, source_revision LIMIT ?`
       )
-      .all(fallbackTtlMs, before, limit) as Row[];
+      .all(
+        fallbackTtlMs,
+        before,
+        after?.lastSeenAt ?? null,
+        after?.lastSeenAt ?? null,
+        after?.lastSeenAt ?? null,
+        after?.sourceRevision ?? null,
+        limit
+      ) as Row[];
     return rows.map(toResolvedSource);
   }
 
