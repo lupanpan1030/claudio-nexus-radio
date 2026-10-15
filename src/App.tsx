@@ -144,7 +144,7 @@ function RadioApp() {
               spectrum={session?.host.spectrum ?? SILENT}
               controller={controller}
               track={track}
-              caption={<LiveCaption view={view} live={live} />}
+              caption={(openPanel) => <LiveCaption view={view} live={live} onOpen={openPanel} />}
               voice={voice}
               taste={taste}
               canPrevious={controller?.canPrevious(snapshot) ?? false}

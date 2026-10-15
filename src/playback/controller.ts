@@ -34,6 +34,19 @@ export function wantsPlayback(snapshot: PlaybackSnapshot | null): boolean {
 }
 
 /**
+ * What the main button (and Space) does now. While a radio start from an
+ * empty queue is still choosing or waiting to retry and will play on
+ * arrival, it cancels that start; nothing is playing yet, so it is not
+ * "pause". `startWillPlay` is the refill status `autoplay`.
+ */
+export type MainButtonIntent = "pause" | "cancel-start" | "play";
+
+export function mainButtonIntent(snapshot: PlaybackSnapshot | null, startWillPlay: boolean): MainButtonIntent {
+  if (wantsPlayback(snapshot)) return "pause";
+  return startWillPlay ? "cancel-start" : "play";
+}
+
+/**
  * Previous = replay what was confirmed started before, as a new occurrence.
  * Without bookkeeping the newly skipped track becomes the latest history entry
  * and a second press would bounce back to it; the navigator remembers the
@@ -101,15 +114,12 @@ export class PlaybackController {
     return this.previousNav.target(snapshot) !== null;
   }
 
-  /**
-   * Main button and Space: pause when playback is wanted (or a radio start is
-   * still going to play), otherwise play.
-   */
+  /** Main button and Space: pause, cancel a pending radio start, or play (see mainButtonIntent). */
   togglePlay(): void {
     const snapshot = this.snapshot();
     if (!snapshot) return;
-    if (wantsPlayback(snapshot) || this.startWillPlay()) this.pause();
-    else this.play();
+    if (mainButtonIntent(snapshot, this.startWillPlay()) === "play") this.play();
+    else this.pause();
   }
 
   /**
@@ -198,12 +208,14 @@ export class PlaybackController {
     else if (controls.panelAction === "replay") this.host.dispatch({ type: "voice.replay" });
   }
 
-  /** A list row: that entry and the ones after it replace the queue, and it plays now. */
-  playFrom(entries: readonly QueueEntryRequest[], index: number): void {
-    const rest = entries.slice(Math.max(0, index));
-    if (rest.length === 0) return;
+  /**
+   * A row already in the queue plays now as that same occurrence: its item id,
+   * origin and any media already prepared for it are kept, and every other
+   * row stays queued. Like any manual move it drops the pending DJ cue.
+   */
+  selectItem(itemId: QueueItemId): void {
     this.host.unlockAudio();
-    this.user([{ type: "replace-queue", entries: rest, autoplay: true }]);
+    this.user([{ type: "select", target: { kind: "item", itemId } }]);
   }
 
   /** Plays one track now as a new occurrence, keeping the rest of the queue. */

@@ -7,14 +7,23 @@ export type ClaudeDecision = {
   segue: ClaudeSegue;
 };
 
+/** Library sources this client knows by name; the server reports any stored value as is. */
+export type KnownTrackSource = "main" | "kugou-cache" | "kugou-api";
+
 export type TrackDto = {
   id: string;
   title: string;
   artist: string;
   album: string;
   extension: string;
-  source: "main" | "kugou-cache" | "kugou-api";
+  /** Stored library source, possibly one this client does not know: compare for display only, never to infer identity. */
+  source: KnownTrackSource | (string & {});
   playable: boolean;
+  /**
+   * v1 library rows: the server-stated TrackRef, or null when no provider
+   * serves the row. Read only through decodeRef; absent from legacy servers.
+   */
+  ref?: unknown;
 };
 
 export type Track = TrackDto;

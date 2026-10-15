@@ -16,7 +16,8 @@ type Row = { readonly item: QueueItem; readonly kind: "played" | "current" | "qu
 
 const ORIGIN_LABEL: Readonly<Record<QueueItem["origin"], string>> = { user: "点播", radio: "电台", chat: "聊天", restore: "上次" };
 
-function toRequest(item: QueueItem): QueueEntryRequest {
+/** A played row is replayed as a new occurrence (history is never re-entered). */
+function replayRequest(item: QueueItem): QueueEntryRequest {
   return { track: item.track, display: item.display, origin: "user" };
 }
 
@@ -24,6 +25,8 @@ function toRequest(item: QueueItem): QueueEntryRequest {
  * The real queue: recently played (confirmed started), the current program
  * and what comes next. Each row is one occurrence keyed by its item id, so a
  * song queued twice shows twice and only the playing occurrence is marked.
+ * Clicking a queued row (or the restored head while idle) selects that very
+ * occurrence; replacing the whole queue is left to "play this other list".
  */
 export function PlaylistQueue({ snapshot, controller, canControl, playlist }: PlaylistQueueProps) {
   const upcoming = snapshot ? upcomingEntries(snapshot) : [];
@@ -46,8 +49,8 @@ export function PlaylistQueue({ snapshot, controller, canControl, playlist }: Pl
 
   const select = (row: Row) => {
     if (!controller || !canControl) return;
-    if (row.kind === "played") return controller.playTrack(toRequest(row.item));
-    if (row.queueIndex >= 0) controller.playFrom(upcoming.map((entry) => toRequest(entry.item)), row.queueIndex);
+    if (row.kind === "played") return controller.playTrack(replayRequest(row.item));
+    if (row.queueIndex >= 0) controller.selectItem(row.item.itemId);
   };
 
   const missingTracks = playlist?.missingTracks ?? [];

@@ -18,9 +18,10 @@ export function activeLyricIndex(asset: LyricsAsset, positionMs: number): number
 }
 
 /**
- * Index of the DJ subtitle segment at voice position `positionMs`, or -1.
- * Without trustworthy timing (plain-text) there is no current segment: the
- * whole script is shown, never an estimate dressed up as alignment.
+ * Index of the DJ subtitle segment at voice position `positionMs` (voice
+ * media clock, rate 1 — the unit of both native and estimated segments), or
+ * -1. Plain text has no current segment: the whole script is shown instead.
+ * Estimated segments do have one, and every view labels them as estimates.
  */
 export function activeSegmentIndex(track: SubtitleTrack | null, positionMs: number): number {
   if (!track || track.timing === "plain-text") return -1;
@@ -33,10 +34,15 @@ export function activeSegmentIndex(track: SubtitleTrack | null, positionMs: numb
   return active;
 }
 
+/** The whole DJ script as one string (the plain-text fallback). */
+export function scriptText(track: SubtitleTrack | null, text: string | null): string {
+  return (text ?? track?.segments.map((segment) => segment.text).join("") ?? "").trim();
+}
+
 /** Lines to show for a DJ script: timed segments, else the full text split at sentence ends (display only). */
 export function subtitleLines(track: SubtitleTrack | null, text: string | null): readonly string[] {
   if (track && track.segments.length > 0 && track.timing !== "plain-text") return track.segments.map((segment) => segment.text);
-  const source = (text ?? track?.segments.map((segment) => segment.text).join("") ?? "").trim();
+  const source = scriptText(track, text);
   if (!source) return [];
   return source
     .replace(/([。！？!?])\s*/g, "$1\n")

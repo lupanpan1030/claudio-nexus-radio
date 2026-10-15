@@ -5,7 +5,7 @@ import { AnimatedContent } from "./AnimatedContent";
 import { ElasticVolumeSlider } from "./ElasticVolumeSlider";
 import { createWaveMemory, formatClock, shapeWave, WAVE_BARS } from "./wave";
 import { useProgramPosition, useVoicePosition } from "../app/hooks";
-import { wantsPlayback, type PlaybackController } from "../playback/controller";
+import { mainButtonIntent, type MainButtonIntent, type PlaybackController } from "../playback/controller";
 import { activeSegmentIndex, PROVENANCE_LABEL, subtitleLines } from "../playback/subtitles";
 import type { VoiceControls } from "../playback/voice-model";
 import type { TasteState } from "../features/taste";
@@ -22,19 +22,32 @@ type PlayerProps = {
   spectrum: SpectrumReader;
   controller: PlaybackController | null;
   track: PlayerTrack | null;
-  /** One short line under the artist: the current lyric or DJ sentence. */
-  caption: ReactNode;
+  /** One short line under the artist (current lyric or DJ sentence); `openPanel` shows the full script and lyrics. */
+  caption: (openPanel: () => void) => ReactNode;
   voice: VoiceControls;
   taste: TasteState;
   canPrevious: boolean;
   busy: boolean;
-  /** A radio start from an empty queue will play when its pick arrives (the main button then cancels it). */
+  /** A radio start from an empty queue will play when its pick arrives (refill `autoplay`; the main button then cancels it). */
   starting: boolean;
   lyrics: (visible: boolean) => ReactNode;
   onHostProfileOpen: (trigger: HTMLButtonElement) => void;
 };
 
 const SILENT_LEVELS: readonly number[] = Object.freeze(Array(WAVE_BARS).fill(0));
+
+const MAIN_LABEL: Readonly<Record<MainButtonIntent, { readonly label: string; readonly title: string }>> = Object.freeze({
+  pause: { label: "暂停", title: "暂停" },
+  "cancel-start": { label: "取消开播", title: "正在挑选第一首歌，点击取消开播" },
+  play: { label: "播放", title: "播放" }
+});
+
+/** Pause / play, or a spinner while a radio start is still choosing (pressing it cancels that start). */
+function MainIcon({ intent }: { readonly intent: MainButtonIntent }) {
+  if (intent === "pause") return <Pause />;
+  if (intent === "cancel-start") return <Loader2 className="spin" />;
+  return <Play />;
+}
 
 /**
  * Display and intent only: everything shown comes from the playback snapshot
@@ -43,13 +56,16 @@ const SILENT_LEVELS: readonly number[] = Object.freeze(Array(WAVE_BARS).fill(0))
  */
 export function Player({ view, live, spectrum, controller, track, caption, voice, taste, canPrevious, busy, starting, lyrics, onHostProfileOpen }: PlayerProps) {
   const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
+  const openPanel = () => setIsVoicePanelOpen(true);
   const [clockTime, setClockTime] = useState(() => new Date());
   const [voiceLevels, setVoiceLevels] = useState<readonly number[]>(SILENT_LEVELS);
   const activeTranscriptRef = useRef<HTMLParagraphElement | null>(null);
   const snapshot = view.snapshot;
   const canControl = view.canControl && controller !== null;
-  // Same rule as controller.togglePlay: "pause" also while a radio start is on its way to playing.
-  const isPlaying = wantsPlayback(snapshot) || starting;
+  // Same rule as controller.togglePlay.
+  const mainIntent = mainButtonIntent(snapshot, starting);
+  const isPlaying = mainIntent === "pause";
+  const mainLabel = MAIN_LABEL[mainIntent];
   const isSongWaveActive = snapshot?.transport === "playing";
   const program = snapshot?.program ?? null;
   const programDeck = program?.deck ? snapshot?.decks[program.deck] : null;
@@ -124,7 +140,7 @@ export function Player({ view, live, spectrum, controller, track, caption, voice
         <div className="mini-copy">
           <strong>{track?.title ?? "等待信号"}</strong>
           <span>{track?.artist ?? "Claudio Radio"}</span>
-          {caption}
+          {caption(openPanel)}
         </div>
         <div className="track-signal" aria-hidden="true">
           {Array.from({ length: 18 }).map((_, index) => (
@@ -137,8 +153,8 @@ export function Player({ view, live, spectrum, controller, track, caption, voice
         <button className="icon-button secondary" onClick={() => controller?.previous()} disabled={!canControl || !canPrevious} title="上一首" aria-label="上一首">
           <SkipBack />
         </button>
-        <button className="icon-button primary" onClick={() => controller?.togglePlay()} disabled={!canControl} title={isPlaying ? "暂停" : "播放"} aria-label={isPlaying ? "暂停" : "播放"}>
-          {isPlaying ? <Pause /> : <Play />}
+        <button className="icon-button primary" onClick={() => controller?.togglePlay()} disabled={!canControl} title={mainLabel.title} aria-label={mainLabel.label} data-intent={mainIntent}>
+          <MainIcon intent={mainIntent} />
         </button>
         <button className="icon-button secondary" onClick={() => controller?.next()} disabled={!canControl} title="下一首" aria-label="下一首">
           {busy ? <Loader2 className="spin" /> : <SkipForward />}
@@ -196,8 +212,8 @@ export function Player({ view, live, spectrum, controller, track, caption, voice
               <h2>{track?.title ?? "Claudio Signal"}</h2>
               <p>{track?.artist ?? "Claudio Radio"}</p>
               <div className="voice-playback-row">
-                <button type="button" onClick={() => controller?.togglePlay()} disabled={!canControl} aria-label={isPlaying ? "暂停歌曲" : "播放歌曲"}>
-                  {isPlaying ? <Pause /> : <Play />}
+                <button type="button" onClick={() => controller?.togglePlay()} disabled={!canControl} aria-label={mainIntent === "cancel-start" ? mainLabel.label : isPlaying ? "暂停歌曲" : "播放歌曲"} title={mainLabel.title} data-intent={mainIntent}>
+                  <MainIcon intent={mainIntent} />
                 </button>
                 <input
                   className="voice-song-progress"
@@ -214,7 +230,7 @@ export function Player({ view, live, spectrum, controller, track, caption, voice
                 <span>{formatClock(positionMs)} / {formatClock(durationMs)}</span>
               </div>
               {lyrics(isVoicePanelOpen)}
-              <div className="voice-transcript">
+              <div className="voice-transcript" data-timing={voice.subtitle?.timing ?? "plain-text"}>
                 {transcript.length === 0 ? (
                   <p><small>Claudio</small>下一段串词正在准备中</p>
                 ) : (

@@ -1938,6 +1938,37 @@ h1 {
   word-break: break-word;
 }
 
+/* DJ script without timing: one truncated line (the full text is in its title and the voice panel). */
+.mini-copy .program-subtitle.is-whole {
+  -webkit-line-clamp: 1;
+}
+
+/* The caption opens the voice panel, where the whole script and lyrics are shown. */
+.mini-copy .caption-open {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mini-copy .program-subtitle .caption-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  opacity: 0.72;
+  vertical-align: 1px;
+}
+
 .dj-voice-inline {
   margin-top: 6px;
   display: flex;

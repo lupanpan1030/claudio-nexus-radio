@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import type { SubtitleTrack } from "@claudio/contracts";
 import type { HostView, ClockReader } from "@claudio/playback-web";
 import { useDisplayedPosition, useTicker, useVoicePosition } from "../app/hooks";
 import { displayedMusicSample } from "../playback/clock";
@@ -86,7 +87,9 @@ export function LyricsPanel(props: {
   return (
     <section className="lyrics-panel" aria-label="歌词">
       <header className="lyrics-panel-head">
-        <small>{display.kind === "voice" ? "Claudio 正在串场" : asset ? `歌词 · ${PROVENANCE_LABEL[asset.timing]}` : "歌词"}</small>
+        <small data-timing={display.kind === "voice" ? (display.subtitle?.timing ?? "plain-text") : asset?.timing}>
+          {display.kind === "voice" ? `Claudio 正在串场 · ${voiceTimingLabel(display.subtitle)}` : asset ? `歌词 · ${PROVENANCE_LABEL[asset.timing]}` : "歌词"}
+        </small>
         <button
           type="button"
           className={stageEnabled ? "lyrics-stage-toggle active" : "lyrics-stage-toggle"}
@@ -100,7 +103,7 @@ export function LyricsPanel(props: {
       <div className="lyrics-panel-body">
         {stageEnabled && <div ref={stageHost} className={display.kind === "music" ? "lyrics-stage-host" : "lyrics-stage-host is-hidden"} aria-hidden="true" />}
         {display.kind === "voice" ? (
-          <ol className="lyrics-lines dj-subtitle">
+          <ol className="lyrics-lines dj-subtitle" data-timing={display.subtitle?.timing ?? "plain-text"}>
             {voiceLines.map((line, index) => (
               <li key={`${index}-${line}`} className={index === voiceActive ? "active" : voiceActive < 0 ? "plain" : ""}>
                 {line}
@@ -134,3 +137,9 @@ export function LyricsPanel(props: {
 }
 
 const noopSubscribe = () => () => {};
+
+/** Voice-branch header: estimated sentence times are said to be estimates; untimed text is the whole script. */
+function voiceTimingLabel(subtitle: SubtitleTrack | null): string {
+  if (!subtitle || subtitle.timing === "plain-text") return "全文";
+  return PROVENANCE_LABEL[subtitle.timing];
+}

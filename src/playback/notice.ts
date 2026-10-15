@@ -26,8 +26,10 @@ export function playbackNotice(input: {
   const snapshot = view.snapshot;
   if (!snapshot) return null;
   if (!view.exclusive) return "这个浏览器无法保证只有一个页面在播放，请只保留一个 Claudio 页面。";
-  if (refill.autoplay && refill.phase === "selecting") return "正在为你挑选一首歌…";
-  if (refill.userInitiated && refill.phase === "selecting" && snapshot.transport === "idle") return "已暂停；挑到的歌会放进队列，不会自动播放。";
+  // Same words as the main button, which cancels such a start ("取消开播").
+  if (refill.autoplay && refill.phase === "selecting") return "正在为你挑选一首歌…再按播放键可取消开播。";
+  if (refill.autoplay && refill.phase === "retry-wait") return "这次没挑到歌，稍后自动重试…再按播放键可取消开播。";
+  if (refill.userInitiated && refill.phase === "selecting" && snapshot.transport === "idle") return "已取消开播；挑到的歌会放进队列，不会自动播放。";
   switch (snapshot.transport) {
     case "blocked":
       return "浏览器拦住了自动播放，点一下播放键继续。";
