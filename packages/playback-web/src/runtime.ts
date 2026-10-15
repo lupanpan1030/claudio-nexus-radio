@@ -11,6 +11,7 @@ import type {
 import {
   createInitialState,
   createSequentialIds,
+  resumableQueueItems,
   step,
   toSnapshot,
   type CoreConfig,
@@ -266,14 +267,11 @@ class Runtime implements PlaybackRuntime {
     this.log({ level: "info", event: "queue.restored", at: this.clockFn(), data: { count: entries.length } });
   }
 
-  /** Persists the queue intent (current program first) whenever its item list changes. */
+  /** Persists the queue intent (the core's resumable items) whenever its item list changes. */
   private saveQueue(): void {
     const store = this.options.queueStore;
     if (!store) return;
-    const snapshot = this.state;
-    const items = [...(snapshot.program ? [snapshot.program.item] : []), ...snapshot.queue.map((entry) => entry.item)].filter(
-      (item, index, all) => all.findIndex((other) => other.itemId === item.itemId) === index
-    );
+    const items = resumableQueueItems(this.state);
     const key = items.map((item) => item.itemId).join("|");
     if (key === this.lastSavedQueue) return;
     this.lastSavedQueue = key;

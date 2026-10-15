@@ -311,6 +311,67 @@ test("queue intent is persisted by the executor and restored stopped: nothing pr
   assert.deepEqual(third.runtime.getSnapshot().queue, [], "malformed storage is ignored, not half-applied");
 });
 
+test("a reload while the DJ talks after A's natural end resumes from B: A is not replayed, nothing restarts by itself", async () => {
+  const savedIds = (storage: ReturnType<typeof memoryStorage>) =>
+    JSON.parse(storage.data.get("claudio.queue")!).entries.map((e: { track: { mediaId: string } }) => e.track.mediaId);
+  for (const voice of ["starting", "speaking", "paused"] as const) {
+    const storage = memoryStorage();
+    const store = createStorageQueueStore(storage, "claudio.queue");
+    const first = createHarness({ djEnabled: true, queueStore: store });
+    await startA(first, ["a", "b", "c"]);
+    await resolvePrepare(first, "b");
+    first.driver.deckEvent("B", { kind: "can-play", through: true });
+    first.ports.cue.last().resolve(cueAsset("下一首"));
+    await flush();
+    first.driver.voiceEvent({ kind: "can-play", through: true });
+    assert.deepEqual(savedIds(storage), ["a", "b", "c"]);
+    first.driver.deckEvent("A", paused(200_000, { atEnd: true }));
+    first.driver.deckEvent("A", { kind: "ended" });
+    if (voice !== "starting") first.driver.voiceEvent({ kind: "playing", positionMs: 0 });
+    if (voice === "paused") {
+      first.runtime.dispatch({ type: "voice.pause" });
+      first.driver.voiceEvent(paused(1_000, { requested: true }));
+    }
+    const before = first.runtime.getSnapshot();
+    assert.equal(before.program?.item.track.mediaId, "a", voice);
+    assert.equal(before.voice?.status, voice);
+    assert.deepEqual(savedIds(storage), ["b", "c"], `${voice}: saved as soon as A ended`);
+    await first.runtime.dispose();
+    assert.deepEqual(savedIds(storage), ["b", "c"], voice);
+
+    const second = createHarness({ djEnabled: true, queueStore: store });
+    const restored = second.runtime.getSnapshot();
+    assert.equal(restored.transport, "idle");
+    assert.equal(restored.voice, null);
+    assert.equal(restored.program, null);
+    assert.deepEqual(restored.queue.map((e) => [e.item.track.mediaId, e.item.origin]), [
+      ["b", "restore"],
+      ["c", "restore"]
+    ]);
+    assert.equal(second.ports.prepare.calls.length, 0);
+    assert.equal(second.ports.cue.calls.length, 0);
+    assert.equal(second.driver.executed.filter((e) => e.type !== "output.volume").length, 0, "no automatic play");
+
+    second.runtime.dispatch({ type: "resume" });
+    assert.equal(second.ports.prepare.calls[0]?.request.track.mediaId, "b", "explicit play starts B");
+    await second.runtime.dispose();
+  }
+});
+
+test("a reload while A is paused in the middle still resumes A first", async () => {
+  const storage = memoryStorage();
+  const store = createStorageQueueStore(storage, "claudio.queue");
+  const first = createHarness({ djEnabled: true, queueStore: store });
+  await startA(first, ["a", "b", "c"]);
+  await resolvePrepare(first, "b");
+  first.runtime.dispatch({ type: "pause" });
+  first.driver.deckEvent("A", paused(90_000, { requested: true }));
+  assert.equal(first.runtime.getSnapshot().transport, "paused");
+  await first.runtime.dispose();
+  const saved = JSON.parse(storage.data.get("claudio.queue")!);
+  assert.deepEqual(saved.entries.map((e: { track: { mediaId: string } }) => e.track.mediaId), ["a", "b", "c"]);
+});
+
 test("dispose during an in-flight receipt: a fetch-like port rejecting on abort schedules no retry timer and emits nothing", async () => {
   const timers = new ManualTimers();
   const facts: unknown[] = [];
