@@ -165,17 +165,62 @@ test("an asynchronously ready renderer flips drawing without new input; the prob
   assert.equal(controller.state.get().drawing, false);
   assert.equal(timers.pending.size, 0);
 
-  // A renderer that never finishes starting: at most maxProbes reads, then it stops.
   first.diagnostics = { renderer: "creating", status: "renderer-starting", mode: "lattice" };
-  controller.push("exec-1", paused);
-  const reads = first.diagnosticReads;
-  for (let index = 0; index < 20; index += 1) timers.tick();
-  assert.equal(first.diagnosticReads - reads, 5, "bounded");
-  assert.equal(timers.pending.size, 0);
-
   controller.push("exec-1", paused);
   assert.equal(timers.pending.size, 1);
   controller.detach();
   assert.equal(timers.pending.size, 0, "detach cancels the probe");
   assert.equal(first.destroyed, true);
+});
+
+test("a renderer still starting when the probe budget runs out is destroyed: it can never draw next to the basic lyrics", async () => {
+  const handles: FakeHandle[] = [];
+  const failures: ((failure: { kind: string; message: string; rendererDisabled: boolean }) => void)[] = [];
+  const mount: FoliaMount = (_host, options) => {
+    const handle = new FakeHandle();
+    handle.diagnostics = { renderer: "creating", status: "renderer-starting", mode: "lattice" };
+    handles.push(handle);
+    if (options?.onFailure) failures.push(options.onFailure);
+    return handle;
+  };
+  const timers = new StepTimers();
+  const controller = new FoliaStageController(async () => ({ ok: true, mount }), {}, { intervalMs: 150, maxProbes: 5 }, timers);
+  controller.attach({} as HTMLElement);
+  await new Promise((resolve) => setImmediate(resolve));
+  const paused = { display: { kind: "none" as const }, clock: null, transport: "paused" as const };
+  controller.push("exec-1", paused);
+  const first = handles[0]!;
+  // Paused page, no new input: only the bounded probe runs.
+  for (let index = 0; index < 4; index += 1) timers.tick();
+  assert.equal(controller.state.get().phase, "ready", "still within the budget");
+  timers.tick();
+  const state = controller.state.get();
+  assert.equal(state.phase, "fallback");
+  assert.equal(state.drawing, false);
+  assert.match(state.reason ?? "", /not ready within 750ms/);
+  assert.equal(first.destroyed, true, "the late renderer has no handle left to draw with");
+  assert.equal(timers.pending.size, 0, "no polling after the budget");
+
+  // Just beyond the budget the renderer would have been ready: nothing changes.
+  first.diagnostics = { renderer: "ready", status: null, mode: "lattice" };
+  for (let index = 0; index < 5; index += 1) timers.tick();
+  controller.push("exec-1", paused);
+  failures[0]?.({ kind: "webgl", message: "late", rendererDisabled: false });
+  failures[0]?.({ kind: "webgl", message: "late", rendererDisabled: true });
+  assert.deepEqual(controller.state.get(), state, "late callbacks and inputs of the destroyed handle are inert");
+  assert.equal(handles.length, 1, "no new handle while in fallback");
+  assert.equal(first.inputs.length, 1, "nothing sent to the destroyed handle");
+
+  // Turning the stage off and on again starts afresh.
+  controller.detach();
+  controller.attach({} as HTMLElement);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.push("exec-1", paused);
+  assert.equal(handles.length, 2);
+  handles[1]!.diagnostics = { renderer: "ready", status: null, mode: "lattice" };
+  timers.tick();
+  assert.equal(controller.state.get().drawing, true);
+  failures[0]?.({ kind: "webgl", message: "stale", rendererDisabled: true });
+  assert.equal(controller.state.get().phase, "ready", "a destroyed handle's callback cannot fail the new one");
+  controller.detach();
 });

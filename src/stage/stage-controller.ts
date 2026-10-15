@@ -52,8 +52,11 @@ const OFF: StageState = Object.freeze({ phase: "off", reason: null, drawing: fal
  * asynchronously. While it is starting the controller re-reads diagnostics on
  * a short, bounded timer (not per frame), so `drawing` turns true when the
  * canvas really appears even if no new input arrives (paused song, quiet
- * observer). The probe stops once the renderer settles, after its budget, or
- * when the handle goes away.
+ * observer). The probe stops once the renderer settles or the handle goes
+ * away. A renderer still starting when the probe budget runs out is given
+ * up: the handle is destroyed and the stage falls back to the basic lyrics,
+ * so a renderer that finishes later can never draw next to them. Callbacks
+ * of a destroyed handle are ignored.
  */
 export class FoliaStageController {
   readonly state: StatusStore<StageState> = createStatusStore<StageState>(OFF);
@@ -66,6 +69,8 @@ export class FoliaStageController {
   private visible = true;
   private last: Omit<FoliaInputLike, "version"> | null = null;
   private probe: { handle: unknown; left: number } | null = null;
+  /** Bumped whenever a handle is destroyed; callbacks of older handles compare against it. */
+  private mounted = 0;
 
   constructor(
     private readonly load: () => Promise<FoliaLoadResult>,
@@ -121,8 +126,10 @@ export class FoliaStageController {
   private recreate(): void {
     this.destroyHandle();
     if (!this.mount || !this.host || this.epoch === null || this.state.get().phase === "fallback") return;
+    const generation = this.mounted;
     try {
       this.handle = this.mount(this.host, { ...this.options, fallback: "none", onFailure: (failure) => {
+        if (generation !== this.mounted) return;
         if (failure.rendererDisabled) this.fallback(`renderer disabled: ${failure.kind}`);
         else this.refreshDrawing();
       } });
@@ -183,9 +190,8 @@ export class FoliaStageController {
     const probe = this.probe;
     if (!probe) return;
     if (probe.left <= 0) {
-      // Still starting after the budget: keep the basic lyrics; the next input re-checks.
       this.probe = null;
-      return;
+      return this.fallback(`renderer not ready within ${this.probePolicy.intervalMs * this.probePolicy.maxProbes}ms`);
     }
     probe.left -= 1;
     probe.handle = this.timers.setTimeout(() => {
@@ -209,6 +215,7 @@ export class FoliaStageController {
 
   private destroyHandle(): void {
     this.stopProbe();
+    this.mounted += 1;
     const handle = this.handle;
     this.handle = null;
     if (!handle) return;
