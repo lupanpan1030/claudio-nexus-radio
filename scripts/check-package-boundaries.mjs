@@ -2,17 +2,16 @@
 // Enforces the dependency direction of the workspace packages:
 //   packages/contracts      → nothing (pure data + decoders)
 //   packages/playback-core  → @claudio/contracts only
-// Both must stay free of DOM/Node/network/vendor knowledge and of ambient clocks.
+//   packages/playback-web   → @claudio/contracts, @claudio/playback-core
+// contracts/core stay free of DOM/Node/network/vendor knowledge and of ambient
+// clocks. playback-web may use the DOM (it owns the media) but reaches the
+// network, storage and logging only through injected ports, never imports the
+// app/server, and never branches on vendor names.
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PACKAGE_RULES = [
-  { name: "@claudio/contracts", dir: "packages/contracts", allowedPackages: [] },
-  { name: "@claudio/playback-core", dir: "packages/playback-core", allowedPackages: ["@claudio/contracts"] }
-];
-
-const FORBIDDEN_TOKENS = [
+const PURE_FORBIDDEN_TOKENS = [
   [/\bDate\s*\.\s*now\b/, "ambient clock Date.now (inject `now`)"],
   [/\bnew\s+Date\b/, "ambient clock new Date (inject `now`)"],
   // Host parsing normalises impossible dates (Feb 30 → Mar 2); contracts parse ISO themselves.
@@ -26,6 +25,30 @@ const FORBIDDEN_TOKENS = [
   [/\b(process|Buffer|require|__dirname)\b/, "Node global"],
   [/\bconsole\b/, "logging side effect"],
   [/\b(kugou|netease|qqmusic|spotify|fish|sqlite|express)\b/i, "vendor/infrastructure name"]
+];
+
+const WEB_FORBIDDEN_TOKENS = [
+  [/\bDate\s*\.\s*now\b/, "ambient clock Date.now (inject `clock`)"],
+  [/\bnew\s+Date\b/, "ambient clock new Date (inject `clock`)"],
+  [/\bDate\s*\.\s*parse\b/, "host date parsing Date.parse (use parseIsoTimestamp)"],
+  [/\bMath\s*\.\s*random\b/, "ambient randomness (inject ids)"],
+  [/\b(fetch|XMLHttpRequest|WebSocket|EventSource)\b/, "network access outside ports"],
+  [/\b(localStorage|sessionStorage|indexedDB)\b/, "storage outside the QueueStore port"],
+  [/\b(process|Buffer|require|__dirname)\b/, "Node global"],
+  [/\bconsole\b/, "logging side effect (use the log port)"],
+  [/\b(kugou|netease|qqmusic|spotify|fish|sqlite|express)\b/i, "vendor/infrastructure name"]
+];
+
+export const PACKAGE_RULES = [
+  { name: "@claudio/contracts", dir: "packages/contracts", allowedPackages: [], forbidden: PURE_FORBIDDEN_TOKENS, allowDom: false },
+  { name: "@claudio/playback-core", dir: "packages/playback-core", allowedPackages: ["@claudio/contracts"], forbidden: PURE_FORBIDDEN_TOKENS, allowDom: false },
+  {
+    name: "@claudio/playback-web",
+    dir: "packages/playback-web",
+    allowedPackages: ["@claudio/contracts", "@claudio/playback-core"],
+    forbidden: WEB_FORBIDDEN_TOKENS,
+    allowDom: true
+  }
 ];
 
 const IMPORT_PATTERNS = [
@@ -121,7 +144,8 @@ export async function checkBoundaries(rootDir) {
     const tsconfigPath = path.join(packageDir, "tsconfig.json");
     const tsconfig = JSON.parse(await readFile(tsconfigPath, "utf8"));
     const lib = (tsconfig.compilerOptions?.lib ?? []).map((entry) => String(entry).toLowerCase());
-    if (lib.length === 0 || lib.some((entry) => entry.startsWith("dom") || entry.startsWith("webworker"))) {
+    if (lib.length === 0) report(tsconfigPath, 1, "lib must be set explicitly");
+    else if (!rule.allowDom && lib.some((entry) => entry.startsWith("dom") || entry.startsWith("webworker"))) {
       report(tsconfigPath, 1, "lib must be set explicitly and exclude DOM/WebWorker");
     }
     if (!Array.isArray(tsconfig.compilerOptions?.types) || tsconfig.compilerOptions.types.length > 0) {
@@ -141,7 +165,7 @@ export async function checkBoundaries(rootDir) {
         }
       }
       const codeOnly = blankStrings(code);
-      for (const [pattern, label] of FORBIDDEN_TOKENS) {
+      for (const [pattern, label] of rule.forbidden) {
         const match = pattern.exec(codeOnly);
         if (match) report(file, lineOf(codeOnly, match.index), `${label}: ${match[0]}`);
       }

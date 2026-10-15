@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/contracts" },
     { "path": "./packages/playback-core" },
+    { "path": "./packages/playback-web" },
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.server.json" }
   ]

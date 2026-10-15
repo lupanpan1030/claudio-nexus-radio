@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "packages/contracts",
-    "packages/playback-core"
+    "packages/playback-core",
+    "packages/playback-web"
   ],
   "scripts": {
     "dev": "concurrently -k -n server,web -c amber,cyan \"npm:dev:server\" \"npm:dev:web\"",
@@ -22,8 +23,9 @@
     "dj:fewshot-selected-five": "tsx server/scripts/dj-fewshot-selected-five.ts",
     "kugou:playback": "tsx server/scripts/kugou-playback-quality.ts",
     "check:boundaries": "node scripts/check-package-boundaries.mjs",
-    "typecheck:packages": "tsc -b packages/playback-core && tsc -p packages/playback-core/tsconfig.test.json && tsc -p packages/contracts/tsconfig.test.json",
-    "test:packages": "tsx --conditions=source --test packages/contracts/test/*.test.ts packages/playback-core/test/*.test.ts scripts/check-package-boundaries.test.mjs"
+    "typecheck:packages": "tsc -b packages/playback-web && tsc -p packages/playback-web/tsconfig.test.json && tsc -p packages/playback-core/tsconfig.test.json && tsc -p packages/contracts/tsconfig.test.json",
+    "test:packages": "tsx --conditions=source --test packages/contracts/test/*.test.ts packages/playback-core/test/*.test.ts packages/playback-web/test/*.test.ts scripts/check-package-boundaries.test.mjs",
+    "test:browser": "node packages/playback-web/e2e/run.mjs"
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -44,6 +46,7 @@
     "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.2.1",
+    "puppeteer-core": "25.8.0",
     "tsx": "^4.23.7",
     "typescript": "^5.9.3",
     "vite": "^7.3.5"

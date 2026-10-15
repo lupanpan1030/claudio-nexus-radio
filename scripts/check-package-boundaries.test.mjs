@@ -20,7 +20,15 @@ async function fixtureRepo(files) {
       dependencies: { "@claudio/contracts": "0.1.0" }
     }),
     "packages/playback-core/tsconfig.json": JSON.stringify({ compilerOptions: { lib: ["ES2022"], types: [] } }),
-    "packages/playback-core/src/index.ts": 'import { ok } from "@claudio/contracts";\nexport const value = ok;\n'
+    "packages/playback-core/src/index.ts": 'import { ok } from "@claudio/contracts";\nexport const value = ok;\n',
+    "packages/playback-web/package.json": JSON.stringify({
+      name: "@claudio/playback-web",
+      exports: { ".": "./dist/index.js" },
+      dependencies: { "@claudio/contracts": "0.1.0", "@claudio/playback-core": "0.1.0" }
+    }),
+    "packages/playback-web/tsconfig.json": JSON.stringify({ compilerOptions: { lib: ["ES2022", "DOM"], types: [] } }),
+    "packages/playback-web/src/index.ts":
+      'import { value } from "@claudio/playback-core";\nexport const el = () => { const a = new Audio(); document.title = String(value); return a; };\nexport const later = () => setTimeout(() => {}, 1);\n'
   };
   for (const [rel, content] of Object.entries({ ...base, ...files })) {
     const full = path.join(root, rel);
@@ -74,6 +82,33 @@ test("host, vendor, reverse and ambient-clock dependencies are reported", async 
     assert.match(messages, /lib must be set explicitly and exclude DOM/);
     assert.match(messages, /types must be \[\]/);
     assert.match(messages, /dependencies may not include express/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("playback-web may own DOM media but not network, storage, Node, app imports or vendor names", async () => {
+  const root = await fixtureRepo({
+    "packages/playback-web/src/bad.ts": [
+      'import { App } from "../../../src/App.js";',
+      'import React from "react";',
+      "export const r = fetch('/api/v1/now');",
+      "export const q = localStorage.getItem('queue');",
+      "export const t = Date.now();",
+      "console.log('x');",
+      "export const v = { kugou: 1 };"
+    ].join("\n")
+  });
+  try {
+    const messages = (await checkBoundaries(root)).map((v) => `${v.file}: ${v.message}`).join("\n");
+    assert.match(messages, /playback-web\/src\/bad\.ts: relative import escapes packages\/playback-web\/src/);
+    assert.match(messages, /playback-web\/src\/bad\.ts: import of react is not allowed/);
+    assert.match(messages, /network access outside ports: fetch/);
+    assert.match(messages, /storage outside the QueueStore port: localStorage/);
+    assert.match(messages, /playback-web\/src\/bad\.ts: ambient clock Date\.now/);
+    assert.match(messages, /logging side effect \(use the log port\)/);
+    assert.match(messages, /playback-web\/src\/bad\.ts: vendor\/infrastructure name: kugou/);
+    assert.doesNotMatch(messages, /playback-web\/src\/index\.ts/, "DOM media and timers are allowed in the executor package");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

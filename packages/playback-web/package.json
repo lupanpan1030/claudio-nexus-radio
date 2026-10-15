@@ -1,0 +1,31 @@
+{
+  "name": "@claudio/playback-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser playback executor: serial runtime around @claudio/playback-core, async operation runner, single-owner A/B/voice Web Audio driver and same-origin executor coordination.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "source": "./src/testing/index.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "NOTICE.md"],
+  "dependencies": {
+    "@claudio/contracts": "0.1.0",
+    "@claudio/playback-core": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsx --conditions=source --test test/*.test.ts",
+    "test:browser": "node e2e/run.mjs"
+  }
+}

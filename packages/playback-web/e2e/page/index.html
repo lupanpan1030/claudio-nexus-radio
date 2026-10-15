@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <title>Claudio playback-web browser suite</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #10131a; color: #e8ecf3; }
+      button { font-size: 16px; padding: 8px 16px; }
+      table { border-collapse: collapse; margin-top: 12px; }
+      td, th { border: 1px solid #39404f; padding: 4px 8px; text-align: left; vertical-align: top; }
+      .display { font-size: 20px; margin-top: 12px; min-height: 2em; }
+      .role { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <button id="go">Start (user gesture)</button>
+    <div id="status"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
