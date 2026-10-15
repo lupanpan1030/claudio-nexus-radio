@@ -43,3 +43,25 @@
     transition: none;
   }
 }
+
+/* Live subtitle under the artist: one line inside the fixed-height strip. */
+.player-strip .mini-copy .program-subtitle {
+  margin: 1px 0 0;
+  max-width: 100%;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+  color: rgba(105, 211, 157, 0.82);
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+/* Untimed DJ text is shown whole and fully readable: no line pretends to be "current". */
+.voice-transcript p.plain {
+  opacity: 1;
+  color: rgba(36, 36, 38, 0.84);
+}

@@ -4,6 +4,8 @@ dist-server
 .env
 .data
 public/private-assets/
+# AGPL Folia stage build, exported by scripts/folia-stage-export.mjs; served, never committed.
+public/vendor/folia-stage/
 *.tsbuildinfo
 *.log
 __pycache__/

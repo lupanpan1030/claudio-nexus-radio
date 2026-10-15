@@ -1,0 +1,140 @@
+/* Song lyrics inside the voice card: Claudio's basic lyrics, the optional Folia stage and the DJ subtitle. */
+.lyrics-panel {
+  position: relative;
+  margin: 12px 0;
+  border-radius: 14px;
+  background: rgba(24, 24, 26, 0.92);
+  color: rgba(244, 240, 231, 0.9);
+  overflow: hidden;
+}
+
+.lyrics-panel-head,
+.lyrics-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: rgba(244, 240, 231, 0.5);
+}
+
+.lyrics-panel-foot {
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.lyrics-panel-foot a {
+  color: rgba(244, 240, 231, 0.66);
+}
+
+.lyrics-stage-toggle {
+  border: 1px solid rgba(244, 240, 231, 0.22);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: transparent;
+  color: rgba(244, 240, 231, 0.7);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lyrics-stage-toggle.active {
+  border-color: rgba(105, 211, 157, 0.7);
+  color: #69d39d;
+}
+
+.lyrics-stage-toggle:focus-visible {
+  outline: 2px solid #69d39d;
+  outline-offset: 2px;
+}
+
+.lyrics-panel-body {
+  position: relative;
+  height: clamp(120px, 22vh, 200px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18%, #000 82%, transparent 100%);
+}
+
+.lyrics-stage-host {
+  position: absolute;
+  inset: 0;
+}
+
+.lyrics-stage-host.is-hidden {
+  visibility: hidden;
+}
+
+.lyrics-lines {
+  position: relative;
+  margin: 0;
+  padding: 38px 18px;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.lyrics-lines li {
+  color: rgba(244, 240, 231, 0.42);
+  transition: color 180ms ease, transform 180ms ease;
+}
+
+.lyrics-lines li.passed {
+  color: rgba(244, 240, 231, 0.28);
+}
+
+.lyrics-lines li.active {
+  color: #f7f3e9;
+  transform: scale(1.04);
+}
+
+.lyrics-lines.plain li,
+.lyrics-lines.dj-subtitle li.plain {
+  color: rgba(244, 240, 231, 0.78);
+}
+
+.lyrics-lines.dj-subtitle li.active {
+  color: #69d39d;
+}
+
+.lyrics-status {
+  margin: 0;
+  padding: 48px 18px;
+  text-align: center;
+  font-size: 13px;
+  color: rgba(244, 240, 231, 0.56);
+}
+
+.voice-card .voice-transcript {
+  min-height: 140px;
+}
+
+.chat-suggestion {
+  margin-top: 6px;
+  border: 1px dashed rgba(105, 211, 157, 0.6);
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: transparent;
+  color: #69d39d;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-suggestion:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyrics-lines li {
+    transition: none;
+  }
+  .lyrics-lines li.active {
+    transform: none;
+  }
+}

@@ -1,6 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import type { NowPlayingDj, Track } from "../types";
 import { AnimatedContent } from "./AnimatedContent";
 import { ParticleField } from "./ParticleField";
 
@@ -10,11 +9,10 @@ type HostProfileDialogProps = {
   open: boolean;
   onClose: () => void;
   returnFocusRef: React.RefObject<HTMLButtonElement | null>;
-  currentTrack: Track | null;
   isPlaying: boolean;
-  nowPlayingDj: NowPlayingDj | null;
   libraryCount: number;
-  todayPlayCount: number;
+  /** Tracks confirmed started in this playback session (not legacy selections). */
+  playedCount: number;
   gptOnline: boolean;
   fishStatus: "online" | "standby" | "offline";
   kugouOnline: boolean;
@@ -77,7 +75,7 @@ export function HostProfileDialog(props: HostProfileDialogProps) {
           <div className="host-stats">
             <div><strong>{props.isPlaying ? "LIVE" : "READY"}</strong><small>STATUS</small></div>
             <div><strong>{props.libraryCount.toLocaleString()}</strong><small>TRACKS</small></div>
-            <div><strong>{props.todayPlayCount}</strong><small>TODAY</small></div>
+            <div><strong>{props.playedCount}</strong><small>PLAYED</small></div>
           </div>
         </div>
 

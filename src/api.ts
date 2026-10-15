@@ -3,14 +3,12 @@ import type {
   CalendarContext,
   DjSampleFeedbackKind,
   DjSampleFeedbackResult,
-  DjLineResult,
   Health,
   KuGouLoginResult,
   KuGouLoginStatus,
   KuGouLibrarySyncResult,
   KuGouLibrarySyncStatus,
   KuGouPlaylist,
-  NowPlayingSnapshot,
   PlaylistLinkInspection,
   PlaylistSuggestion,
   ProgramLineResult,
@@ -18,9 +16,7 @@ import type {
   RadioPick,
   TasteProfile,
   TasteTrainingResult,
-  TodayPick,
   Track,
-  TtsResult,
   WeatherContext
 } from "./types";
 
@@ -38,25 +34,7 @@ export async function getHealth(): Promise<Health> {
   return response.json();
 }
 
-export async function getNowPlaying(): Promise<NowPlayingSnapshot> {
-  const response = await fetch("/api/now");
-  return response.json();
-}
 
-export async function updateNowPlaying(snapshot: Omit<NowPlayingSnapshot, "updatedAt" | "source">): Promise<NowPlayingSnapshot> {
-  const response = await fetch("/api/now", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(snapshot)
-  });
-
-  if (!response.ok) {
-    const details = await response.json();
-    throw new Error(details.error ?? "Failed to update now-playing snapshot.");
-  }
-
-  return response.json();
-}
 
 export async function scanLibrary(): Promise<{ ok: boolean; count: number; error?: string }> {
   const response = await fetch("/api/library/scan", { method: "POST" });
@@ -71,41 +49,7 @@ export async function getLibrary(query = "", limit = 5000): Promise<{ tracks: Tr
   return response.json();
 }
 
-export async function getNextPick(query = ""): Promise<RadioPick> {
-  const response = await fetch("/api/radio/next", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, withWeather: false })
-  });
 
-  if (!response.ok) {
-    const details = await response.json();
-    throw new Error(details.error ?? "无法生成下一首推荐");
-  }
-
-  return response.json();
-}
-
-export async function generateDjLine(pick: RadioPick, query = ""): Promise<DjLineResult> {
-  const response = await fetch("/api/dj/line", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      songId: pick.songId,
-      query,
-      reason: pick.reason,
-      moodTags: pick.moodTags,
-      previousLine: pick.djLine
-    })
-  });
-
-  if (!response.ok) {
-    const details = await response.json();
-    throw new Error(details.error ?? "AI DJ 串词生成失败");
-  }
-
-  return response.json();
-}
 
 export async function generateProgramLine(
   type: ProgramLineType,
@@ -132,20 +76,6 @@ export async function generateProgramLine(
   return response.json();
 }
 
-export async function synthesizeDjVoice(text: string, options: { refresh?: boolean } = {}): Promise<TtsResult> {
-  const response = await fetch("/api/tts/synthesize", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, purpose: "dj", refresh: options.refresh === true })
-  });
-
-  if (!response.ok) {
-    const details = await response.json();
-    throw new Error(details.error ?? "AI DJ voice failed");
-  }
-
-  return response.json();
-}
 
 export async function sendDjSampleFeedback(options: {
   kind: DjSampleFeedbackKind;
@@ -298,10 +228,6 @@ export async function syncKuGouLibrary(): Promise<KuGouLibrarySyncResult> {
   return result;
 }
 
-export async function getToday(): Promise<{ picks: TodayPick[] }> {
-  const response = await fetch("/api/radio/today");
-  return response.json();
-}
 
 export async function getWeather(): Promise<WeatherContext> {
   const response = await fetch("/api/weather");
@@ -329,11 +255,12 @@ export async function getCalendarContext(): Promise<CalendarContext> {
   return result.calendar;
 }
 
-export async function sendChat(message: string): Promise<ChatReply> {
+export async function sendChat(message: string, signal?: AbortSignal): Promise<ChatReply> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message })
+    body: JSON.stringify({ message }),
+    signal
   });
 
   if (!response.ok) {
@@ -364,18 +291,25 @@ export async function trainTaste(message: string): Promise<TasteTrainingResult> 
   return response.json();
 }
 
-export async function sendTaste(trackId: string, action: string): Promise<void> {
-  await fetch("/api/taste", {
-    method: "POST",
+/** Preference marks. A non-2xx answer is a failure: the caller must not show the mark as saved. */
+export async function setTaste(trackId: string, action: string, active: boolean, signal?: AbortSignal): Promise<void> {
+  const response = await fetch("/api/taste", {
+    method: active ? "POST" : "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ trackId, action })
+    body: JSON.stringify({ trackId, action }),
+    signal
   });
+  const result = await response.json().catch(() => null);
+  if (!response.ok || result?.ok !== true) throw new Error(result?.error ?? `偏好保存失败（HTTP ${response.status}）`);
 }
 
-export async function removeTaste(trackId: string, action: string): Promise<void> {
-  await fetch("/api/taste", {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ trackId, action })
-  });
+/** Raw library rows; the playback catalog decodes the TrackRef each row may carry. */
+export async function getLibraryRows(signal?: AbortSignal, limit = 5000): Promise<unknown[]> {
+  const url = new URL("/api/library", window.location.origin);
+  url.searchParams.set("q", "");
+  url.searchParams.set("limit", String(limit));
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`曲库读取失败（HTTP ${response.status}）`);
+  const result = await response.json();
+  return Array.isArray(result?.tracks) ? result.tracks : [];
 }

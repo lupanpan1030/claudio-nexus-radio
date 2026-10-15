@@ -8,7 +8,7 @@ test("player metadata keeps the title and artist without a playback-state label"
     readFile(new URL("../styles.css", import.meta.url), "utf8")
   ]);
 
-  assert.match(player, /<span>\{currentTrack\?\.artist \?\? "Claudio Radio"\}<\/span>/);
+  assert.match(player, /<span>\{track\?\.artist \?\? "Claudio Radio"\}<\/span>/);
   assert.doesNotMatch(player, /PLAYING|READY|play-state|mini-detail/);
   assert.doesNotMatch(stylesheet, /\.mini-detail|\.play-state/);
 });

@@ -1,0 +1,16 @@
+{
+  "name": "claudio-folia-stage",
+  "version": "0.1.0",
+  "contractVersion": 2,
+  "sourceSha256": "711c667fc00f133456e7aad77bd1d9e1034573bae459cdc82460e384299fd67e",
+  "entry": "folia-stage.js",
+  "entrySha256": "5f50fc6ae75166d2a19b0ac54287c265272268afb2a09f1ae7ac7b16553f52af",
+  "stageGitCommit": "0d33b05d6a3f8ded16d0eea0ba6c6104318f6065",
+  "stageWorkingTreeDirty": false,
+  "upstream": {
+    "repository": "https://github.com/chthollyphile/folia-major",
+    "commit": "a57803d09283d417497a4b951834c00d7b6f5a3c",
+    "packageVersion": "0.7.19"
+  },
+  "base": "/vendor/folia-stage/"
+}
