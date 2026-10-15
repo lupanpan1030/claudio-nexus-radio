@@ -21,8 +21,45 @@ export const API_V1_PATHS = {
 
 export type ApiV1PathName = keyof typeof API_V1_PATHS;
 
+/**
+ * Further v1 routes the server already serves and the web app calls. Shapes
+ * are fixed by the response schemas in ./protocol.ts; route behaviour is the
+ * server's.
+ */
+export const API_V1_EXTRA_PATHS = {
+  /** GET → ProtocolHandshakeV1. Answers even when the server runs the legacy protocol. */
+  protocol: "/api/v1/protocol",
+  /** GET (Range) → media bytes. A StreamHandle is this prefix + an opaque token. */
+  streams: "/api/v1/playback/streams/:token",
+  /** DELETE → NarrationResponseV1 of the cancelled cue. */
+  narrationCue: "/api/v1/playback/narration/:cueId",
+  /** GET text/event-stream; each `event: now` carries one NowProjectionV1. */
+  nowStream: "/api/v1/now/stream",
+  /** GET ?limit → StartedHistoryResponseV1 (confirmed started facts only). */
+  startedHistory: "/api/v1/history/started",
+  /** GET ?limit → CandidateHistoryResponseV1 (selection audit; never listening history). */
+  candidateHistory: "/api/v1/history/candidates",
+  /** GET ?q&limit → CatalogSearchResponseV1. */
+  catalogSearch: "/api/v1/catalog/search"
+} as const;
+
+export type ApiV1ExtraPathName = keyof typeof API_V1_EXTRA_PATHS;
+
+/** Every path a v1 handshake announces. */
+export type ApiV1AnnouncedPathName = ApiV1PathName | ApiV1ExtraPathName;
+
+/** Stream handles issued by the server start with this prefix. */
+export const API_V1_STREAM_HANDLE_PREFIX = API_V1_EXTRA_PATHS.streams.replace(":token", "");
+
+/** SSE event name used by the now stream. */
+export const NOW_STREAM_EVENT = "now" as const;
+
 export function preparationPath(preparationId: string): string {
   return API_V1_PATHS.preparation.replace(":preparationId", encodeURIComponent(preparationId));
+}
+
+export function narrationCuePath(cueId: string): string {
+  return API_V1_EXTRA_PATHS.narrationCue.replace(":cueId", encodeURIComponent(cueId));
 }
 
 /**

@@ -179,6 +179,7 @@ test("now projections from the same executor must be strictly newer", () => {
   const base = {
     protocolVersion: PROTOCOL_VERSION,
     executorInstanceId: asId<never>("exec"),
+    generation: 3,
     seq: 5,
     observedAt: "2026-10-16T01:00:00Z",
     transport: "playing" as const,
@@ -195,6 +196,7 @@ test("the now projection carries the exhausted transport", () => {
   const projection = {
     protocolVersion: PROTOCOL_VERSION,
     executorInstanceId: "exec",
+    generation: 0,
     seq: 1,
     observedAt: "2026-10-16T01:00:00Z",
     transport: "exhausted",

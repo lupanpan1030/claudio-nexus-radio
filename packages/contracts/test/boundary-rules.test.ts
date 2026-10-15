@@ -46,6 +46,7 @@ const media = {
 const now = {
   protocolVersion: 1,
   executorInstanceId: "executor-1",
+  generation: 1,
   seq: 1,
   observedAt: "2026-10-16T00:00:00Z",
   transport: "idle",

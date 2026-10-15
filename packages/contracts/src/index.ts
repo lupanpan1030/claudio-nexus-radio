@@ -20,3 +20,4 @@ export * from "./api/narration.js";
 export * from "./api/lyrics.js";
 export * from "./api/started.js";
 export * from "./api/now.js";
+export * from "./api/protocol.js";
