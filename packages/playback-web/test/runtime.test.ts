@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { asId, type LoadId, type PlaybackReceipt, type ResolvedMedia } from "@claudio/contracts";
-import { PortError, createPlaybackRuntime, createStorageQueueStore, type PreparePort } from "../src/index.js";
+import { PortError, ReceiptReporter, createPlaybackRuntime, createStorageQueueStore, type PreparePort, type ReceiptPort } from "../src/index.js";
 import { FakeDriver } from "../src/testing/index.js";
-import { ControlledPort, Ports, confirmPlaying, paused, createHarness, cueAsset, entry, flush, media, memoryStorage, resolvePrepare, type Harness } from "./helpers.js";
+import { ControlledPort, ManualTimers, Ports, confirmPlaying, paused, createHarness, cueAsset, entry, flush, media, memoryStorage, resolvePrepare, type Harness } from "./helpers.js";
 
 function itemIds(h: Harness): string[] {
   return h.runtime.getSnapshot().queue.map((e) => e.item.itemId);
@@ -131,20 +131,18 @@ test("sequential talk through the runtime: A ends → voice → B, with cue/voic
   assert.ok(h.driver.effects("deck.play").some((e) => e.deck === "B"));
 });
 
-test(
-  "natural end reported as the browser does (pause with atEnd → ended) still hands over",
-  { todo: "needs R1 contract MediaEvent.paused.atEnd; current core treats the end-of-media pause as an external pause" },
-  async () => {
-    const h = createHarness({ djEnabled: false });
-    await startA(h, ["a", "b"]);
-    await resolvePrepare(h, "b");
-    h.driver.deckEvent("B", { kind: "can-play", through: true });
-    h.driver.deckEvent("A", paused(200_000, { atEnd: true }));
-    h.driver.deckEvent("A", { kind: "ended" });
-    assert.equal(h.runtime.getSnapshot().transport === "paused", false, "end of media is not a user pause");
-    assert.ok(h.driver.effects("deck.play").some((e) => e.deck === "B"));
-  }
-);
+test("natural end reported as the browser does (pause with atEnd → ended) still hands over", async () => {
+  const h = createHarness({ djEnabled: false });
+  await startA(h, ["a", "b"]);
+  await resolvePrepare(h, "b");
+  h.driver.deckEvent("B", { kind: "can-play", through: true });
+  h.driver.deckEvent("A", paused(200_000, { atEnd: true }));
+  assert.notEqual(h.runtime.getSnapshot().transport, "paused", "the end-of-media pause is not an interruption");
+  h.driver.deckEvent("A", { kind: "ended" });
+  assert.notEqual(h.runtime.getSnapshot().transport, "paused", "end of media is not a user pause");
+  assert.ok(h.driver.effects("deck.play").some((e) => e.deck === "B"));
+  assert.equal(h.runtime.getSnapshot().program?.item.track.mediaId, "b");
+});
 
 test("started receipt: bounded retries with the identical idempotency key; final failure is observable and never touches audio", async () => {
   const ports = new Ports();
@@ -279,8 +277,10 @@ test("a driver exception becomes a media error for that identity instead of wedg
   runtime.dispatch({ type: "resume" });
   await flush();
   const snapshot = runtime.getSnapshot();
-  assert.equal(snapshot.transport, "failed");
+  // One failed item below the failure bound with nothing else queued: still wants to play, waiting for more.
+  assert.equal(snapshot.transport, "exhausted");
   assert.equal(snapshot.history[0]?.outcome, "failed");
+  assert.equal(snapshot.history[0]?.started, false);
   assert.equal(runtime.dispatch({ type: "pause" }).accepted, true, "still accepting input");
   await runtime.dispose();
 });
@@ -309,4 +309,29 @@ test("queue intent is persisted by the executor and restored stopped: nothing pr
   storage.setItem("claudio.queue", "{not json");
   const third = createHarness({ queueStore: store });
   assert.deepEqual(third.runtime.getSnapshot().queue, [], "malformed storage is ignored, not half-applied");
+});
+
+test("dispose during an in-flight receipt: a fetch-like port rejecting on abort schedules no retry timer and emits nothing", async () => {
+  const timers = new ManualTimers();
+  const facts: unknown[] = [];
+  let calls = 0;
+  const port: ReceiptPort = {
+    report: (_receipt, signal) => {
+      calls += 1;
+      // Like fetch: rejects with the abort reason once the signal aborts.
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    }
+  };
+  const reporter = new ReceiptReporter({ port, emit: (fact) => facts.push(fact), clock: () => timers.now, timers, policy: { maxAttempts: 4, backoffMs: [1_000] } });
+  const receipt = { idempotencyKey: asId("k1"), itemId: asId("i1"), loadId: asId("L1") } as unknown as PlaybackReceipt;
+  const done = reporter.report(receipt);
+  assert.equal(timers.size, 1, "attempt deadline armed");
+  reporter.dispose();
+  assert.equal(await done, "failed");
+  await flush(); // the abort rejection settles in a later microtask
+  assert.equal(timers.size, 0, "no backoff timer created after dispose");
+  assert.equal(reporter.activeCount, 0);
+  timers.advance(60_000);
+  assert.equal(calls, 1, "no retry");
+  assert.deepEqual(facts, []);
 });

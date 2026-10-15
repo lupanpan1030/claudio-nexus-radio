@@ -69,8 +69,8 @@ export class FakeCompressor extends FakeNode {
   release = new FakeParam(0);
 }
 
-export class FakeAudioContext {
-  state: "running" | "suspended" | "closed";
+export class FakeAudioContext extends EventTarget {
+  private stateValue: "running" | "suspended" | "closed";
   currentTime = 10;
   sampleRate = 44_100;
   readonly destination = new FakeNode();
@@ -82,8 +82,18 @@ export class FakeAudioContext {
   private pendingResume: (() => void)[] = [];
 
   constructor(state: "running" | "suspended" = "running") {
-    this.state = state;
+    super();
+    this.stateValue = state;
     this.resumeAllowed = state === "running";
+  }
+  get state() {
+    return this.stateValue;
+  }
+  /** Changes the state and fires `statechange`, as the browser does. */
+  setState(next: "running" | "suspended" | "closed") {
+    if (this.stateValue === next) return;
+    this.stateValue = next;
+    this.dispatchEvent(new Event("statechange"));
   }
   createGain() {
     const gain = new FakeGain();
@@ -105,21 +115,26 @@ export class FakeAudioContext {
   }
   resume(): Promise<void> {
     this.resumeCalls++;
-    if (this.state === "closed") return Promise.reject(new DOMException("closed", "InvalidStateError"));
+    if (this.stateValue === "closed") return Promise.reject(new DOMException("closed", "InvalidStateError"));
     if (this.resumeAllowed) {
-      this.state = "running";
+      this.setState("running");
       return Promise.resolve();
     }
     return new Promise((resolve) => this.pendingResume.push(resolve));
   }
+  suspend(): Promise<void> {
+    if (this.stateValue === "closed") return Promise.reject(new DOMException("closed", "InvalidStateError"));
+    this.setState("suspended");
+    return Promise.resolve();
+  }
   /** A user gesture arrived: pending resumes complete. */
   allowResume() {
     this.resumeAllowed = true;
-    this.state = "running";
+    this.setState("running");
     for (const resolve of this.pendingResume.splice(0)) resolve();
   }
   async close() {
-    this.state = "closed";
+    this.setState("closed");
   }
 }
 
@@ -132,10 +147,14 @@ export class FakeMediaElement extends EventTarget {
   src = "";
   preload = "";
   crossOrigin: string | null = null;
-  currentTime = 0;
+  private position = 0;
   duration = Number.NaN;
   paused = true;
   ended = false;
+  seeking = false;
+  /** When true a seek is declined synchronously (empty `seekable`): no seeking, no seeked. */
+  seekableEmpty = false;
+  readonly seeks: number[] = [];
   readyState = 0;
   playbackRate = 1;
   defaultPlaybackRate = 1;
@@ -146,6 +165,30 @@ export class FakeMediaElement extends EventTarget {
   playMode: "resolve" | "not-allowed" | "pending" = "resolve";
   readonly plays: PendingPlay[] = [];
 
+  get currentTime() {
+    return this.position;
+  }
+  /** Setting it runs the seek algorithm: `seeking` turns true synchronously; `completeSeek` fires seeked. */
+  set currentTime(seconds: number) {
+    if (this.readyState === 0) {
+      this.position = seconds;
+      return;
+    }
+    if (this.seekableEmpty) return;
+    this.position = seconds;
+    this.ended = false;
+    this.seeking = true;
+    this.seeks.push(seconds);
+  }
+  /** Media time advances without a seek (playback). */
+  advanceTo(seconds: number) {
+    this.position = seconds;
+  }
+  /** The engine finished the latest seek: seeking=false, then the queued `seeked`. */
+  completeSeek() {
+    this.seeking = false;
+    this.fire("seeked");
+  }
   load() {
     this.loads++;
   }

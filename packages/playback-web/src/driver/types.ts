@@ -10,22 +10,20 @@ export function isDriverEffect(effect: PlaybackEffect): effect is DriverEffect {
 }
 
 /**
- * `paused` as observed on the element:
+ * `paused` as observed on the element (contract MediaEvent):
  *  - atEnd: `element.ended` read in the handler (HTML fires `pause` right before `ended`);
  *  - requested: this event answers one of the driver's own pause() calls for a
  *    deck.pause/voice.pause effect (counted only when the element was not
  *    already paused, one consumed per event); false = OS/platform/other agent.
- * The core contract is gaining both fields; until then they ride along
- * structurally and the core still receives a valid MediaEvent.
  */
-export type PausedObservation = Extract<MediaEvent, { kind: "paused" }> & { readonly atEnd: boolean; readonly requested: boolean };
+export type PausedObservation = Extract<MediaEvent, { kind: "paused" }>;
 
 /** Live clock of one channel, read from the media element when asked. */
 export interface ChannelClock {
   readonly positionMs: number;
-  /** 0 while paused, waiting, ended or not yet playing. */
+  /** 0 while paused, waiting, ended, not yet playing, or while the audio output is not running. */
   readonly rate: number;
-  /** Runtime clock ms when sampled. */
+  /** Runtime clock ms at which `positionMs` was observed (for snapshot clocks: when the executor observed it). */
   readonly observedAt: number;
   readonly state: "loading" | "playing" | "waiting" | "paused" | "ended" | "failed";
 }
@@ -40,7 +38,13 @@ export interface VoiceClock extends ChannelClock {
   readonly voiceLoadId: VoiceLoadId;
 }
 
-/** Read-only clock view handed to subtitles/stage. Carries identities, never elements. */
+/**
+ * Read-only clock view handed to subtitles/stage. Carries identities, never elements.
+ *  media-element: sampled from the executor's elements at `at` (observedAt = at);
+ *  snapshot:      an observer's copy of the executor's last broadcast samples,
+ *                 each with its original observedAt; extrapolate with a bound
+ *                 (projectClock) instead of treating it as a fresh reading.
+ */
 export interface ClockReading {
   readonly at: number;
   readonly source: "media-element" | "snapshot";

@@ -42,5 +42,5 @@ export {
 export { createBrowserDriver, type BrowserDriver, type BrowserDriverOptions, type DriverDiagnostics } from "./driver/browser-driver.js";
 export { DEFAULT_MEDIA_TIMEOUTS, type MediaTimeouts } from "./driver/media-slot.js";
 export { createExecutorLock, type ExecutorLock, type ExecutorLockOptions, type ExecutorRole, type LockManagerLike } from "./coordination/executor-lock.js";
-export { createPlaybackHost, clockFromSnapshot, type HostView, type PlaybackHost, type PlaybackHostOptions } from "./coordination/host.js";
+export { createPlaybackHost, clockFromSnapshot, projectClock, DEFAULT_MAX_EXTRAPOLATION_MS, type HostView, type PlaybackHost, type PlaybackHostOptions } from "./coordination/host.js";
 export { type BroadcastChannelLike, type ChannelFactory } from "./coordination/snapshot-channel.js";

@@ -6,9 +6,11 @@ import { silentLog, type LogPort, type RuntimeClock, performanceClock } from "..
  *  executor:    holds the Web Lock; the only page allowed to create a driver
  *  observer:    another page holds the lock; read-only
  *  unsupported: no Web Locks in this browser; nothing is claimed
+ *  failed:      won the lock but onAcquire threw; the lock was released so
+ *               another page can take over, and this page does not ask again
  *  disposed:    released
  */
-export type ExecutorRole = "pending" | "executor" | "observer" | "unsupported" | "disposed";
+export type ExecutorRole = "pending" | "executor" | "observer" | "unsupported" | "failed" | "disposed";
 
 /** Structural subset of the Web Locks API so tests and non-DOM hosts can inject one. */
 export interface LockManagerLike {
@@ -19,7 +21,12 @@ export interface ExecutorLockOptions {
   readonly name: string;
   /** Defaults to `navigator.locks`; pass null to model a browser without Web Locks. */
   readonly locks?: LockManagerLike | null;
-  /** Runs when this page becomes the executor (create the runtime/driver here). */
+  /**
+   * Runs when this page becomes the executor (create the runtime/driver here).
+   * If it throws, onRelease runs for cleanup, the lock is released at once and
+   * the role becomes "failed" (terminal: retrying here could win the lock again
+   * and fail in a loop while a healthy page waits).
+   */
   readonly onAcquire: () => Promise<void> | void;
   /** Runs before the lock is released (dispose the runtime here) so two pages never sound together. */
   readonly onRelease: () => Promise<void> | void;
@@ -66,17 +73,22 @@ export function createExecutorLock(options: ExecutorLockOptions): ExecutorLock {
     if (disposed) return;
     setRole("executor");
     const held = new Promise<void>((resolve) => (release = resolve));
+    let acquired = true;
     try {
       await options.onAcquire();
     } catch (error) {
+      acquired = false;
       log({ level: "error", event: "executor.acquire-failed", at: clock(), data: String(error) });
     }
-    await held;
+    // A failed start holds nothing worth keeping: clean up and leave the callback so the lock passes on.
+    if (acquired) await held;
+    release = null;
     try {
       await options.onRelease();
     } catch (error) {
       log({ level: "error", event: "executor.release-failed", at: clock(), data: String(error) });
     }
+    if (!acquired && !disposed) setRole("failed");
   };
 
   let settled: Promise<void>;

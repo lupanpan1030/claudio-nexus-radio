@@ -9,10 +9,16 @@ export interface KeyValueStorage {
 
 const STORED_VERSION = 1;
 
-const storedQueueDecoder = object<{ version: 1; entries: QueueEntryRequest[] }>({
+/**
+ * What is persisted of a queue entry. Item ids are not: a restored queue is a
+ * new runtime's queue, and ids reserved by the old one mean nothing to it.
+ */
+type StoredEntry = Pick<QueueEntryRequest, "track" | "display" | "origin">;
+
+const storedQueueDecoder = object<{ version: 1; entries: StoredEntry[] }>({
   version: literal(STORED_VERSION),
   entries: array(
-    object<QueueEntryRequest>({
+    object<StoredEntry>({
       track: trackRefDecoder,
       display: nullable(trackDisplayDecoder),
       origin: literal("user", "radio", "chat", "restore")
@@ -42,7 +48,8 @@ export function createStorageQueueStore(storage: KeyValueStorage, key: string): 
       return decoded.ok ? decoded.value.entries : [];
     },
     save(entries) {
-      storage.setItem(key, JSON.stringify({ version: STORED_VERSION, entries }));
+      const stored: StoredEntry[] = entries.map(({ track, display, origin }) => ({ track, display, origin }));
+      storage.setItem(key, JSON.stringify({ version: STORED_VERSION, entries: stored }));
     }
   };
 }

@@ -1,7 +1,7 @@
 import type { CueId, DeckId, LoadId, MediaEvent, VoiceLoadId } from "@claudio/contracts";
 import { hostTimers, performanceClock, silentLog, type LogPort, type RuntimeClock, type StreamUrlPort, type Timers } from "../ports.js";
 import { MixerGraph } from "./audio-graph.js";
-import { DEFAULT_MEDIA_TIMEOUTS, MediaSlot, type MediaTimeouts } from "./media-slot.js";
+import { DEFAULT_MEDIA_TIMEOUTS, MediaSlot, OUTPUT_CLOSED, type MediaTimeouts, type OutputReadiness } from "./media-slot.js";
 import type { ClockReading, DeckClock, DriverEffect, MediaFact, PlaybackDriver, SpectrumReader, VoiceClock } from "./types.js";
 
 export interface BrowserDriverOptions {
@@ -74,12 +74,12 @@ class Driver implements BrowserDriver {
   private readonly timers: Timers;
   private readonly log: LogPort;
   private readonly timeouts: MediaTimeouts;
-  private readonly visibilityListener = new AbortController();
+  private readonly listeners = new AbortController();
   private disposed = false;
   private disposing: Promise<void> | null = null;
   private created = 0;
   private releasedCount = 0;
-  private unlockWait: Promise<boolean> | null = null;
+  private unlockWait: Promise<OutputReadiness> | null = null;
   private abandonUnlock: (() => void) | null = null;
 
   readonly spectrum: SpectrumReader;
@@ -104,12 +104,12 @@ class Driver implements BrowserDriver {
         // Timers and timeupdate may have been throttled while hidden: re-anchor clocks from the elements.
         if (doc.visibilityState !== "visible" || this.disposed) return;
         this.log({ level: "debug", event: "driver.resample", at: this.clock(), data: { reason: "visible" } });
-        this.decks.A?.slot.resample();
-        this.decks.B?.slot.resample();
-        this.voice?.slot.resample();
+        for (const slot of this.slots()) slot.resample();
       },
-      { signal: this.visibilityListener.signal }
+      { signal: this.listeners.signal }
     );
+    // Suspension (OS interruption, another app, an explicit suspend) freezes every element clock at once.
+    graph.context.addEventListener("statechange", () => this.onContextState(), { signal: this.listeners.signal });
   }
 
   connect(sink: (fact: MediaFact) => void): void {
@@ -122,7 +122,7 @@ class Driver implements BrowserDriver {
       case "deck.load":
         return this.loadDeck(effect.deck, effect.loadId, this.options.urls.music(effect.media.stream.handle), effect.startAtMs);
       case "deck.play":
-        return this.deckSlot(effect.deck, effect.loadId)?.play();
+        return this.deckSlot(effect.deck, effect.loadId)?.play(effect.playId);
       case "deck.pause": {
         const current = this.deckSlot(effect.deck, effect.loadId);
         if (!current) return;
@@ -144,7 +144,7 @@ class Driver implements BrowserDriver {
       case "voice.load":
         return this.loadVoice(effect.cueId, effect.voiceLoadId, effect.asset.voice.stream.handle, effect.asset.voice.playbackRate);
       case "voice.play":
-        return this.voiceSlot(effect.cueId, effect.voiceLoadId)?.play();
+        return this.voiceSlot(effect.cueId, effect.voiceLoadId)?.play(effect.playId);
       case "voice.pause":
         return this.voiceSlot(effect.cueId, effect.voiceLoadId)?.pause();
       case "voice.stop":
@@ -174,7 +174,8 @@ class Driver implements BrowserDriver {
   unlock(): void {
     if (this.disposed) return;
     const ctx = this.graph.context;
-    if (ctx.state !== "running") ctx.resume().catch((error: unknown) => this.log({ level: "warn", event: "driver.unlock-failed", at: this.clock(), data: String(error) }));
+    // A closed context never runs again; resuming it only rejects.
+    if (ctx.state !== "running" && ctx.state !== "closed") ctx.resume().catch((error: unknown) => this.log({ level: "warn", event: "driver.unlock-failed", at: this.clock(), data: String(error) }));
   }
 
   diagnostics(): DriverDiagnostics {
@@ -193,7 +194,7 @@ class Driver implements BrowserDriver {
   dispose(): Promise<void> {
     if (this.disposing) return this.disposing;
     this.disposed = true;
-    this.visibilityListener.abort();
+    this.listeners.abort();
     this.releaseDeck("A");
     this.releaseDeck("B");
     this.releaseVoice();
@@ -204,6 +205,23 @@ class Driver implements BrowserDriver {
   }
 
   // ------------------------------------------------------------------ internals
+
+  private slots(): MediaSlot[] {
+    return [this.decks.A?.slot, this.decks.B?.slot, this.voice?.slot].filter((slot): slot is MediaSlot => slot !== undefined);
+  }
+
+  private onContextState(): void {
+    if (this.disposed) return;
+    const state = this.graph.context.state;
+    this.log({ level: "info", event: "driver.context-state", at: this.clock(), data: { state, contextTime: state === "closed" ? null : this.graph.context.currentTime } });
+    if (state === "closed") {
+      // Closed by someone else (our dispose detaches first): every live channel has lost its output.
+      for (const slot of this.slots()) slot.failOutput(OUTPUT_CLOSED);
+      return;
+    }
+    const running = state === "running";
+    for (const slot of this.slots()) slot.setOutputRunning(running);
+  }
 
   private deckSlot(deck: DeckId, loadId: LoadId): MediaSlot | null {
     const entry = this.decks[deck];
@@ -257,7 +275,9 @@ class Driver implements BrowserDriver {
       timeouts: this.timeouts,
       clock: this.clock,
       timeIntervalMs: this.options.timeFactIntervalMs ?? 1000,
-      ensureRunning: () => this.ensureRunning()
+      ensureRunning: () => this.ensureRunning(),
+      outputRunning: this.graph.context.state === "running",
+      note: (event, data) => this.log({ level: "debug", event: `driver.${event}`, at: this.clock(), data })
     });
   }
 
@@ -278,27 +298,29 @@ class Driver implements BrowserDriver {
     this.releasedCount += 1;
   }
 
-  /** `true` synchronously when running; otherwise a bounded wait for resume(). */
-  private ensureRunning(): Promise<boolean> | true {
+  /** "running" synchronously when running; otherwise a bounded wait for resume(). A closed context fails at once. */
+  private ensureRunning(): Promise<OutputReadiness> | OutputReadiness {
     const ctx = this.graph.context;
-    if (ctx.state === "running") return true;
+    if (ctx.state === "running") return "running";
+    if (ctx.state === "closed") return "closed";
     if (this.unlockWait) return this.unlockWait;
-    const wait = new Promise<boolean>((resolve) => {
+    const wait = new Promise<OutputReadiness>((resolve) => {
       let done = false;
       let timer: unknown = null;
-      const finish = (running: boolean) => {
+      const settle = () => (ctx.state === "running" ? "running" : ctx.state === "closed" ? "closed" : "not-allowed");
+      const finish = (result: OutputReadiness) => {
         if (done) return;
         done = true;
         this.timers.clearTimeout(timer);
         this.unlockWait = null;
         this.abandonUnlock = null;
-        resolve(running);
+        resolve(result);
       };
-      this.abandonUnlock = () => finish(false);
-      timer = this.timers.setTimeout(() => finish(ctx.state === "running"), this.timeouts.unlockMs);
+      this.abandonUnlock = () => finish("not-allowed");
+      timer = this.timers.setTimeout(() => finish(settle()), this.timeouts.unlockMs);
       ctx.resume().then(
-        () => finish(ctx.state === "running"),
-        () => finish(false)
+        () => finish(settle()),
+        () => finish(settle())
       );
     });
     this.unlockWait = wait;

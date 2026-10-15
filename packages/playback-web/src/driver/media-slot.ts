@@ -1,6 +1,6 @@
-import type { DurationInfo, ErrorInfo, MediaEvent, PlayRejection } from "@claudio/contracts";
+import type { DurationInfo, ErrorInfo, MediaEvent, PlayRejection, PlayRequestId } from "@claudio/contracts";
 import type { Timers } from "../ports.js";
-import type { ChannelClock, PausedObservation } from "./types.js";
+import type { ChannelClock } from "./types.js";
 
 export interface MediaTimeouts {
   /** From load start until `canplay`. */
@@ -11,10 +11,22 @@ export interface MediaTimeouts {
   readonly stallMs: number;
   /** AudioContext.resume() before reporting the play as not allowed. */
   readonly unlockMs: number;
+  /**
+   * How often an unanswered seek is checked. While `element.seeking` the
+   * check re-arms; once the element is no longer seeking and no `seeked`
+   * came, the seek is answered from the element's actual position.
+   */
+  readonly seekCheckMs: number;
 }
 
 /** Bounds, not measured optima; a stalled stream is reported instead of hanging silently forever. */
-export const DEFAULT_MEDIA_TIMEOUTS: MediaTimeouts = Object.freeze({ loadMs: 20_000, startMs: 15_000, stallMs: 20_000, unlockMs: 4_000 });
+export const DEFAULT_MEDIA_TIMEOUTS: MediaTimeouts = Object.freeze({ loadMs: 20_000, startMs: 15_000, stallMs: 20_000, unlockMs: 4_000, seekCheckMs: 1_000 });
+
+/** What waiting for the shared AudioContext to run ended with. */
+export type OutputReadiness = "running" | "not-allowed" | "closed";
+
+/** The shared output can never run again (context closed outside our dispose). */
+export const OUTPUT_CLOSED: ErrorInfo = Object.freeze({ class: "unavailable", code: "audio_output_closed" });
 
 export interface MediaSlotOptions {
   readonly element: HTMLAudioElement;
@@ -30,11 +42,15 @@ export interface MediaSlotOptions {
   readonly clock: () => number;
   /** Minimum spacing of `time` observations forwarded from `timeupdate`. */
   readonly timeIntervalMs: number;
-  /** Resolves true once the shared AudioContext is running (bounded by the caller). */
-  readonly ensureRunning: () => Promise<boolean> | true;
+  /** "running" synchronously when the shared AudioContext runs; otherwise a bounded wait (see BrowserDriver). */
+  readonly ensureRunning: () => Promise<OutputReadiness> | OutputReadiness;
+  /** Whether the shared AudioContext is running when the slot is created; later changes arrive via setOutputRunning. */
+  readonly outputRunning: boolean;
+  /** Debug notes (dropped/synthesized observations) for logs and test evidence. */
+  readonly note?: (event: string, data?: unknown) => void;
 }
 
-type Watchdog = "load" | "start" | "stall";
+type Watchdog = "load" | "start" | "stall" | "seek";
 
 /**
  * One load of one media element. A new load always gets a new element and a
@@ -43,6 +59,30 @@ type Watchdog = "load" | "start" | "stall";
  * play() promises of an old load therefore cannot reach the runtime under a
  * newer identity: the listeners are gone and every callback checks `released`
  * and the play token it was issued with.
+ *
+ * Within one load, media events are queued on the element's own task source
+ * and dispatched in order. That order is what attributes them:
+ *  - every paused→playing transition of the element is followed by exactly
+ *    one `pause` event when it pauses again (own pause(), natural end, OS).
+ *    The slot numbers those transitions (own play() calls that unpaused the
+ *    element, plus `play` events it did not cause) and so knows which `pause`
+ *    event, by ordinal, will answer a pause() call: the next one if the call
+ *    paused the element, an earlier still-queued one if the element was
+ *    already paused, none if nothing is owed (then it acknowledges at once);
+ *  - a `playing`/`waiting` dispatched while such an acknowledgement is
+ *    outstanding was queued before that pause and belongs to a superseded
+ *    play, so it is not reported (a later play's `playing` follows the `pause`);
+ *  - a `seeked` dispatched while the element is seeking again answers an
+ *    older target; only the latest seek is acknowledged.
+ * DOM events carry no request identity; only a play() promise does, so only
+ * `play-rejected` names the play request (playId) it answers.
+ *
+ * The element's clock only advances while the shared AudioContext renders.
+ * While it does not (suspended, interrupted), the slot reports rate 0 and a
+ * `waiting` for a channel that was reported playing; when it runs again a
+ * channel that still wants to play and whose element is still unpaused
+ * reports `playing` at its actual position. A paused, ended or released
+ * element is never revived by the context resuming.
  */
 export class MediaSlot {
   private readonly element: HTMLAudioElement;
@@ -52,18 +92,35 @@ export class MediaSlot {
   private released = false;
   private failed = false;
   private wantPlay = false;
+  /** Network starvation (`waiting` event), independent of the output state. */
   private waiting = false;
   private everPlayed = false;
   private playToken = 0;
   private pendingSeekMs: number | null;
+  /** An own seek has not been acknowledged with `seeked` yet. */
+  private seekUnanswered = false;
   private lastTimeEmit = -Infinity;
   private lastDurationMs: number | null | undefined = undefined;
-  /** Own pause() calls made while the element was playing, each answered by one `pause` event. */
-  private requestedPauses = 0;
+  /** Own play() calls that unpaused the element (each queues one `play` event). */
+  private ownUnpauses = 0;
+  private ownPlayEventsQueued = 0;
+  /** `play` events not caused by this slot (the platform resumed the element). */
+  private externalUnpauses = 0;
+  private pauseEventsSeen = 0;
+  /** Pause acknowledgements owed, keyed by the ordinal of the `pause` event that answers them. */
+  private readonly pendingAcks = new Map<number, number>();
+  private outputRunning: boolean;
+  /** The last rolling observation sent was `playing` (the core may extrapolate). */
+  private reportedPlaying = false;
+  /** A `playing` is owed once the output runs again. */
+  private owedPlaying = false;
+  /** Watchdogs suspended while the output is not running (a frozen clock is not a stall). */
+  private readonly heldWatchdogs = new Set<"start" | "stall">();
 
   constructor(private readonly options: MediaSlotOptions) {
     const element = options.element;
     this.element = element;
+    this.outputRunning = options.outputRunning;
     this.pendingSeekMs = options.startAtMs > 0 ? options.startAtMs : null;
     element.preload = "auto";
     if (options.crossOrigin) element.crossOrigin = options.crossOrigin;
@@ -81,30 +138,24 @@ export class MediaSlot {
     return this.released;
   }
 
-  play(): void {
+  play(playId: PlayRequestId): void {
     if (this.released || this.failed) return;
     this.wantPlay = true;
     // Already rolling: play() would resolve without a new `playing` event, so no start watchdog.
     if (!this.element.paused && this.everPlayed) return;
     const token = ++this.playToken;
-    this.arm("start", this.options.timeouts.startMs, () => {
-      if (token === this.playToken) this.fail({ class: "retryable", code: "media_start_timeout" });
-    });
+    this.armStart();
     const ready = this.options.ensureRunning();
-    if (ready === true) return this.callPlay(token);
+    if (typeof ready === "string") return ready === "running" ? this.callPlay(token, playId) : this.refusePlay(ready, playId);
     ready.then(
-      (running) => {
-        if (token !== this.playToken || this.released) return;
-        if (running) return this.callPlay(token);
-        this.disarm("start");
-        this.wantPlay = false;
-        this.options.emit({ kind: "play-rejected", reason: "not-allowed" });
+      (result) => {
+        if (token !== this.playToken || this.released || this.failed) return;
+        if (result === "running") return this.callPlay(token, playId);
+        this.refusePlay(result, playId);
       },
       () => {
-        if (token !== this.playToken || this.released) return;
-        this.disarm("start");
-        this.wantPlay = false;
-        this.options.emit({ kind: "play-rejected", reason: "not-allowed" });
+        if (token !== this.playToken || this.released || this.failed) return;
+        this.refusePlay("not-allowed", playId);
       }
     );
   }
@@ -112,19 +163,59 @@ export class MediaSlot {
   pause(): void {
     if (this.released) return;
     this.wantPlay = false;
+    this.owedPlaying = false;
     this.playToken += 1; // a pending play() rejection caused by this pause is expected, not reported
     this.disarm("start");
     this.disarm("stall");
-    // pause() on an already paused element fires no event, so only count calls that will be answered.
-    if (!this.element.paused) this.requestedPauses += 1;
-    this.element.pause();
+    this.heldWatchdogs.clear();
+    const el = this.element;
+    el.pause();
+    // The `pause` event ordinal that answers this call: the one this call caused,
+    // or the latest one still queued. None owed: the element is settled, acknowledge now.
+    const answeredBy = this.pauseTransitions();
+    if (answeredBy > this.pauseEventsSeen) this.pendingAcks.set(answeredBy, (this.pendingAcks.get(answeredBy) ?? 0) + 1);
+    else this.emitIfLive({ kind: "paused", positionMs: el.currentTime * 1000, atEnd: el.ended, requested: true });
   }
 
   seek(positionMs: number): void {
     if (this.released || this.failed) return;
     const target = Math.max(0, positionMs);
-    if (this.element.readyState >= HAVE_METADATA) this.element.currentTime = target / 1000;
-    else this.pendingSeekMs = target;
+    if (this.element.readyState >= HAVE_METADATA) this.startSeek(target);
+    else this.pendingSeekMs = target; // answered after loadedmetadata applies it
+  }
+
+  /** The shared AudioContext started or stopped rendering. */
+  setOutputRunning(running: boolean): void {
+    if (this.released || this.failed || running === this.outputRunning) return;
+    this.outputRunning = running;
+    const el = this.element;
+    if (!running) {
+      for (const kind of ["start", "stall"] as const) {
+        if (!this.watchdogs.has(kind)) continue;
+        this.disarm(kind);
+        this.heldWatchdogs.add(kind);
+      }
+      if (this.reportedPlaying) {
+        this.reportedPlaying = false;
+        this.owedPlaying = true;
+        this.emitIfLive({ kind: "waiting", positionMs: el.currentTime * 1000 });
+      }
+      return;
+    }
+    const held = new Set(this.heldWatchdogs);
+    this.heldWatchdogs.clear();
+    if (held.has("start") && this.wantPlay) this.armStart();
+    if (held.has("stall") && this.wantPlay && this.waiting) this.armStall();
+    if (!this.owedPlaying) return;
+    this.owedPlaying = false;
+    // Only a channel that still wants to play and whose element was never paused meanwhile resumes.
+    if (!this.wantPlay || el.paused || el.ended || this.waiting || el.readyState < HAVE_FUTURE_DATA || this.pendingAcks.size > 0) return;
+    this.reportPlaying();
+  }
+
+  /** The shared output is gone for good: terminal for this load. */
+  failOutput(error: ErrorInfo): void {
+    this.fail(error);
   }
 
   readClock(): ChannelClock {
@@ -146,6 +237,8 @@ export class MediaSlot {
     this.wantPlay = false;
     this.playToken += 1;
     for (const kind of [...this.watchdogs.keys()]) this.disarm(kind);
+    this.heldWatchdogs.clear();
+    this.pendingAcks.clear(); // unloaded first: nothing is acknowledged any more
     this.listeners.abort();
     const el = this.element;
     try {
@@ -168,29 +261,97 @@ export class MediaSlot {
     if (el.ended) return "ended";
     if (!this.everPlayed && el.paused) return el.readyState >= HAVE_FUTURE_DATA ? "paused" : "loading";
     if (el.paused) return "paused";
-    return this.waiting ? "waiting" : "playing";
+    return this.waiting || !this.outputRunning ? "waiting" : "playing";
   }
 
   private rate(): number {
     const el = this.element;
-    if (this.released || this.failed || el.paused || el.ended || this.waiting || el.readyState < HAVE_FUTURE_DATA) return 0;
+    if (this.released || this.failed || !this.outputRunning || el.paused || el.ended || this.waiting || el.readyState < HAVE_FUTURE_DATA) return 0;
     return el.playbackRate;
   }
 
-  private callPlay(token: number): void {
+  /** Paused→playing transitions so far, minus the current one if the element is playing now = pause transitions. */
+  private pauseTransitions(): number {
+    return this.ownUnpauses + this.externalUnpauses - (this.element.paused ? 0 : 1);
+  }
+
+  private refusePlay(result: Exclude<OutputReadiness, "running">, playId: PlayRequestId): void {
+    if (result === "closed") return this.fail(OUTPUT_CLOSED);
+    this.disarm("start");
+    this.heldWatchdogs.delete("start");
+    this.wantPlay = false;
+    this.options.emit({ kind: "play-rejected", reason: "not-allowed", playId });
+  }
+
+  private callPlay(token: number, playId: PlayRequestId): void {
+    const el = this.element;
+    const wasPaused = el.paused;
     let pending: Promise<void> | undefined;
     try {
-      pending = this.element.play();
+      pending = el.play();
     } catch (error) {
       pending = Promise.reject(error);
+    }
+    // A play() refused up front (no user activation) leaves the element paused and queues nothing.
+    if (wasPaused && !el.paused) {
+      this.ownUnpauses += 1;
+      this.ownPlayEventsQueued += 1;
     }
     // play() resolving is not "playing": only the `playing` event is reported as such.
     pending?.catch((error: unknown) => {
       if (token !== this.playToken || this.released || this.failed) return;
       this.disarm("start");
+      this.heldWatchdogs.delete("start");
       this.wantPlay = false;
-      this.options.emit({ kind: "play-rejected", reason: rejectionOf(error) });
+      this.options.emit({ kind: "play-rejected", reason: rejectionOf(error), playId });
     });
+  }
+
+  private reportPlaying(): void {
+    this.reportedPlaying = true;
+    this.emitIfLive({ kind: "playing", positionMs: this.element.currentTime * 1000 });
+  }
+
+  private startSeek(targetMs: number): void {
+    const el = this.element;
+    this.seekUnanswered = true;
+    el.currentTime = targetMs / 1000;
+    // The seek algorithm sets `seeking` synchronously; if it is false the element
+    // declined to seek (e.g. nothing seekable) and no `seeked` will ever answer.
+    if (!el.seeking) {
+      this.options.note?.("seek.not-started", { targetMs, positionMs: el.currentTime * 1000 });
+      return this.answerSeek();
+    }
+    this.armSeekCheck();
+  }
+
+  private armSeekCheck(): void {
+    this.arm("seek", this.options.timeouts.seekCheckMs, () => {
+      if (!this.seekUnanswered) return;
+      if (this.element.seeking) return this.armSeekCheck();
+      this.options.note?.("seek.unanswered", { positionMs: this.element.currentTime * 1000 });
+      this.answerSeek();
+    });
+  }
+
+  private answerSeek(): void {
+    this.seekUnanswered = false;
+    this.disarm("seek");
+    this.emitIfLive({ kind: "seeked", positionMs: this.element.currentTime * 1000 });
+  }
+
+  private armStart(): void {
+    const token = this.playToken;
+    const expire = () => {
+      if (token === this.playToken) this.fail({ class: "retryable", code: "media_start_timeout" });
+    };
+    if (this.outputRunning) this.arm("start", this.options.timeouts.startMs, expire);
+    else this.heldWatchdogs.add("start");
+  }
+
+  private armStall(): void {
+    if (this.outputRunning) this.arm("stall", this.options.timeouts.stallMs, () => this.fail({ class: "retryable", code: "media_stall_timeout" }));
+    else this.heldWatchdogs.add("stall");
   }
 
   private listen(): void {
@@ -207,10 +368,9 @@ export class MediaSlot {
     const position = () => el.currentTime * 1000;
 
     on("loadedmetadata", () => {
-      if (this.pendingSeekMs !== null) {
-        el.currentTime = this.pendingSeekMs / 1000;
-        this.pendingSeekMs = null;
-      }
+      const pending = this.pendingSeekMs;
+      this.pendingSeekMs = null;
+      if (pending !== null) this.startSeek(pending);
       this.emitDuration();
     });
     // Streams can refine their duration later; each change is a new measurement.
@@ -225,28 +385,61 @@ export class MediaSlot {
       this.disarm("load");
       this.emitIfLive({ kind: "can-play", through: true });
     });
+    on("play", () => {
+      if (this.ownPlayEventsQueued > 0) this.ownPlayEventsQueued -= 1;
+      else this.externalUnpauses += 1;
+    });
     on("playing", () => {
+      if (this.pendingAcks.size > 0) {
+        // Queued before an own pause that has not been answered yet: it belongs to a superseded play.
+        this.options.note?.("playing.superseded", { positionMs: position() });
+        return;
+      }
       this.waiting = false;
       this.everPlayed = true;
       this.disarm("start");
       this.disarm("stall");
-      this.emitIfLive({ kind: "playing", positionMs: position() });
+      this.heldWatchdogs.clear();
+      if (!this.outputRunning) {
+        // The element started but nothing renders: not audible, and its clock will not advance.
+        this.owedPlaying = true;
+        this.reportedPlaying = false;
+        this.emitIfLive({ kind: "waiting", positionMs: position() });
+        return;
+      }
+      this.reportPlaying();
     });
     on("waiting", () => {
+      if (this.pendingAcks.size > 0) return; // from before an own pause, like `playing` above
       this.waiting = true;
-      if (this.wantPlay) this.arm("stall", this.options.timeouts.stallMs, () => this.fail({ class: "retryable", code: "media_stall_timeout" }));
+      this.reportedPlaying = false;
+      if (this.wantPlay) this.armStall();
       this.emitIfLive({ kind: "waiting", positionMs: position() });
     });
     on("stalled", () => this.emitIfLive({ kind: "stalled" }));
     on("pause", () => {
       this.waiting = false;
+      this.reportedPlaying = false;
+      this.owedPlaying = false;
       this.disarm("stall");
-      const requested = this.requestedPauses > 0;
-      if (requested) this.requestedPauses -= 1;
-      const observation: PausedObservation = { kind: "paused", positionMs: position(), atEnd: el.ended, requested };
-      this.emitIfLive(observation);
+      this.heldWatchdogs.delete("stall");
+      const ordinal = ++this.pauseEventsSeen;
+      let acks = 0;
+      for (const [answeredBy, count] of this.pendingAcks) {
+        if (answeredBy > ordinal) continue;
+        acks += count;
+        this.pendingAcks.delete(answeredBy);
+      }
+      const observed = { kind: "paused", positionMs: position(), atEnd: el.ended } as const;
+      if (acks === 0) return this.emitIfLive({ ...observed, requested: false });
+      // One acknowledgement per pause() call this event answers.
+      for (let i = 0; i < acks; i += 1) this.emitIfLive({ ...observed, requested: true });
     });
-    on("seeked", () => this.emitIfLive({ kind: "seeked", positionMs: position() }));
+    on("seeked", () => {
+      // Still seeking: a later seek superseded this one and its own `seeked` follows.
+      if (el.seeking || !this.seekUnanswered) return;
+      this.answerSeek();
+    });
     on("ratechange", () => this.emitIfLive({ kind: "time", positionMs: position(), rate: this.rate() }));
     on("timeupdate", () => {
       const now = this.options.clock();
@@ -257,8 +450,11 @@ export class MediaSlot {
     on("ended", () => {
       this.wantPlay = false;
       this.waiting = false;
+      this.reportedPlaying = false;
+      this.owedPlaying = false;
       this.disarm("start");
       this.disarm("stall");
+      this.heldWatchdogs.clear();
       this.emitIfLive({ kind: "ended" });
     });
     on("error", () => this.fail(mediaErrorInfo(el.error)));
@@ -285,6 +481,7 @@ export class MediaSlot {
     this.wantPlay = false;
     this.playToken += 1;
     for (const kind of [...this.watchdogs.keys()]) this.disarm(kind);
+    this.heldWatchdogs.clear();
     try {
       this.element.pause();
     } catch {

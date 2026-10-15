@@ -73,9 +73,13 @@ export class ReceiptReporter {
       const controller = new AbortController();
       slot.controller = controller;
       let answered = false;
+      // A late answer after dispose (or after the slot was replaced) must not schedule anything:
+      // dispose's abort makes a fetch-like port reject in a later microtask.
+      const live = () => !this.disposed && this.inFlight.get(receipt.idempotencyKey) === slot;
       const onFailure = (retryable: boolean, reason: unknown) => {
         if (answered) return;
         answered = true;
+        if (!live()) return;
         this.timers.clearTimeout(slot.timer);
         slot.controller = null;
         this.log({ level: "debug", event: "receipt.attempt-failed", at: this.options.clock(), data: { key: receipt.idempotencyKey, attempt: n, reason } });
@@ -97,6 +101,7 @@ export class ReceiptReporter {
         (status) => {
           if (answered) return;
           answered = true;
+          if (!live()) return;
           this.timers.clearTimeout(slot.timer);
           slot.controller = null;
           settle(status, n);

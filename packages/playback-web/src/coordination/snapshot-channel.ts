@@ -10,13 +10,19 @@ export interface BroadcastChannelLike {
 
 export type ChannelFactory = (name: string) => BroadcastChannelLike;
 
-export const PROTOCOL = "claudio.playback-snapshot/1";
+export const PROTOCOL = "claudio.playback-snapshot/2";
 
+/**
+ * `epoch` is the runtime clock time at which the sending page started its
+ * runtime. Web Locks hand execution over one page at a time, so a successor's
+ * epoch is larger than its predecessor's: observers order executors by it
+ * (and messages of one executor by `seq`) without keeping a history of ids.
+ */
 export type ChannelMessage =
-  | { readonly protocol: typeof PROTOCOL; readonly type: "snapshot"; readonly instanceId: string; readonly seq: number; readonly snapshot: PlaybackSnapshot }
+  | { readonly protocol: typeof PROTOCOL; readonly type: "snapshot"; readonly instanceId: string; readonly epoch: number; readonly seq: number; readonly snapshot: PlaybackSnapshot }
   /** An observer asks the executor to re-send its latest snapshot. */
   | { readonly protocol: typeof PROTOCOL; readonly type: "hello" }
-  | { readonly protocol: typeof PROTOCOL; readonly type: "ended"; readonly instanceId: string; readonly seq: number };
+  | { readonly protocol: typeof PROTOCOL; readonly type: "ended"; readonly instanceId: string; readonly epoch: number; readonly seq: number };
 
 export function parseChannelMessage(data: unknown): ChannelMessage | null {
   if (typeof data !== "object" || data === null) return null;
@@ -26,15 +32,19 @@ export function parseChannelMessage(data: unknown): ChannelMessage | null {
     case "hello":
       return { protocol: PROTOCOL, type: "hello" };
     case "snapshot":
-      if (typeof message.instanceId !== "string" || !Number.isSafeInteger(message.seq)) return null;
+      if (!hasIdentity(message)) return null;
       if (typeof message.snapshot !== "object" || message.snapshot === null) return null;
       return message as unknown as ChannelMessage;
     case "ended":
-      if (typeof message.instanceId !== "string" || !Number.isSafeInteger(message.seq)) return null;
+      if (!hasIdentity(message)) return null;
       return message as unknown as ChannelMessage;
     default:
       return null;
   }
+}
+
+function hasIdentity(message: Record<string, unknown>): boolean {
+  return typeof message.instanceId === "string" && typeof message.epoch === "number" && Number.isFinite(message.epoch) && Number.isSafeInteger(message.seq);
 }
 
 export function defaultChannelFactory(): ChannelFactory | null {
