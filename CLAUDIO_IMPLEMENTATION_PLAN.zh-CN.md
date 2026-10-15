@@ -191,7 +191,7 @@ flowchart TB
 
 - `TrackRef { providerId, mediaId }`表示目录媒体；内部`accountRef/authRevision`在服务端区分登录实例，不进入公开DTO。`QueueItemId`表示一次入队，重复同曲必须不同；与catalog主键分开。
 - `ResolvedMedia`包含该次解析确认的recording identity、`sourceRevision`、opaque stream handle、expiry和可用能力。签名URL刷新不必改变录音版本，换录音或无法证明相同则重建revision、清词并取消旧cue。新stream handle绑定已解析资源，不能内部静默回退到另一个录音。
-- `loadId/epoch`标识一次deck装载，`transitionId`绑定from/to条目，`cueId`绑定文稿/声音版本；每个异步结果、媒体事件、字幕都带对应身份。跨层禁止只传songId。core经注入的ID工厂生成QueueItemId；服务端prepared/asset ID另设。暂停/恢复不伪装成一次新入队。
+- `loadId/epoch`标识一次deck装载，`transitionId`绑定from/to条目，`cueId`绑定文稿/声音版本；每个异步结果、媒体事件、字幕都带对应身份。跨层禁止只传songId。QueueItemId由同一owner的注入ID工厂生成；通常由core分配，电台候选可由应用端口预分配后随入队命令提交，core负责唯一性与接受。服务端prepared/asset ID另设；已登记候选通过GET复用同一准备记录，不二次POST取消重建。暂停/恢复不伪装成一次新入队。
 - `PreparedItem`分别表示候选、解析、文稿、TTS资产、metadata、可开始播放；URL成功不等于媒体准备完。TTS时长允许known/unknown并注明测量来源，实际rate另算；未知时长不做叠前奏预算，不制造固定假值。
 - `PlaybackSnapshot`有requested/loading/playing/waiting/paused/failed等实际状态、A/B各自时钟、voice时钟、displayItem及版本；`TransitionPlan`表达模式、参与条目、前提、时序锚点和过期条件，不假装计划已经执行。
 
@@ -212,7 +212,7 @@ flowchart TB
 - 预取、歌词、封面、TTS绑定目标item/source/epoch和cueId；返回与播放前都校验。不匹配就丢弃，不能仅靠UI隐藏。转场cue另绑定transitionId及from/to项；顺序口播时B尚未开播，校验的是仍有效的转场与已确定下一项，不要求UI提前把B标成正在播。A/B各自保留media身份，旧A结束不得推进B两次。尽量Abort取消请求，且仍需代次校验处理已返回结果。
 - 以媒体playing/position推进、pause、waiting、seeked、ratechange、ended、error等确认状态；play()成功和请求200不代表已发声。stalled可能仍有缓冲，不一律判暂停。
 - 暂停将参与输出的音乐与正在进行的DJ一起停，保存各自位置并取消旧增益排程，禁止等待中的cue新启动；恢复只继续仍有效的媒体/同一cue剩余部分，并重新锚定排程，不从头重播。已因skip/seek/失效取消的DJ不恢复。跳歌停止旧voice、取消调度/增益包络并恢复基准音量；seek取消当前转场及其cue，无论voice是否已开始，均不因本次seek自动补播；不用歌曲seek位置拖动DJ字幕。未来正常下一次转场可在新transition/cue下复用尚未播出的不可变资产，重新检查录音与窗口；已经开始又被取消的口播不自动重播。
-- 手动voice控制也经过同一协调器。音乐与DJ音量、mute、实际说话状态分开；duck结束恢复最新用户音量，不能恢复某次旧快照。
+- 手动voice控制也经过同一协调器：明确replay/stop/pause/resume，只有用户显式重播才为当前录音的保留资产创建新cue/load；过期或错录音不播，不新增歌曲started。用户单独暂停voice与全局暂停分别记来源，全局恢复不能撤销独立voice暂停；顺序口播阶段voice就是节目输出，暂停它同时暂停节目。音乐与DJ音量、mute、实际说话状态分开；duck结束恢复最新用户音量，不能恢复某次旧快照。
 - 同一应用origin/浏览器配置只允许一个执行者。优先验证Web Locks持锁与释放；BroadcastChannel只能传状态，不能单独当排他锁。能力不支持时明确限制为单执行页，不宣称跨浏览器/跨设备排他。刷新恢复为暂停，不自动重播旧口播。
 
 ### 6.2 准备下一首与历史
@@ -313,10 +313,11 @@ R1允许先用fixture推进，不再要求先把旧播放器改正确。旧版�
 | C1 保存统一架构与实施规则 | 本文件及历史文档明确唯一活动入口 | 文档检查；本次提交可从git log定位 |
 | R1a 共享合同与纯核心初版 | Opus已实施；包含decoder与seek窗口修复，尚未接入现有UI | 71项新测试、包类型检查、依赖边界检查及隔离生产build通过；这是可回退的代码检查点，不是R1全部验收 |
 | R1b 媒体事实与字幕边界 | Opus已修复自然结束pause→ended、真实时长优先级、歌词录音身份、voice实际状态及资产共享 | 95项包/边界测试、类型检查、隔离生产build通过；8项变异检查均捕获回归 |
-| R1c 队列与转场确认收口 | Fable独立初审后已完成证据复议，Opus待实施 | 队列耗尽保留意图、备用deck自发事件/请求确认、A结束的preroll截止及实际录音连续性；完成前不升级为可用播放器 |
-| R2 浏览器执行器 | Opus在独立worktree实施 | 浏览器工具已通过PCM/停顿/后台自测，不能替代新driver验收 |
-| R3 服务端与完整UI切换 | 服务端初版已实施，Codex复跑64项隔离测试和类型检查通过；UI尚未切换 | 独立迁移样本与Fable源码审查进行中，歌词解析边界待修；尚未触碰真实数据或启动生产服务 |
-| R4 Folia舞台 | 独立`claudio-folia-stage`已完成初版，47单测及55项浏览器检查通过 | 原生Lattice真实渲染；主仓adapter待接入，许可证材料与生命周期独立复核中；主仓不提交AGPL派生源码或产物 |
+| R1c 队列与转场确认收口 | 已提交`b3e2ff0`；耗尽意图、preroll截止、实际录音连续性及暂停/seek确认已实现 | 124项测试、类型检查、隔离build通过，19项变异捕获；独立复现的同load旧playing误记started仍在下一片处理 |
+| R1d 完整UI所需合同 | Fable与Codex已确定手动voice、原子队列替换、候选ID预留/一次认领及停止态恢复，Opus正在实施 | 同时统一now generation与共享HTTP合同；不能用UI直接操纵audio绕过 |
+| R2 浏览器执行器 | 初版已从独立worktree合入`1c675a4`；Opus继续修独立审查问题 | 实际R1预览副本下12项浏览器场景通过，有PCM与后台/双页证据；并非最终主仓成绩。锁初始化失败、dispose、输出挂起与观察时钟待收口 |
+| R3 服务端与完整UI切换 | 服务端初版`ffd2295`，修复片`180a863`通过91项隔离测试；另一Opus正在切换完整UI | 解析、ref限定revision、备份权限与KuGou启动接缝已修；文件替换、并发候选、now代际、handle激活、DJ上下文仍在加固。42行迁移样本保全/幂等/回滚通过，未触碰真实数据 |
+| R4 Folia舞台 | 独立仓修复版`0d33b05`，48单测、67项浏览器检查通过；干净提交已重建并导出 | 原生Lattice、失败恢复、完整对应源码包、依赖许可校验已落地；contractVersion=2。主仓adapter接线中，AGPL源码/产物不提交主仓 |
 | R5 日常观察 | 未开始 | 需真实使用时间，不能压缩成自动测试结果 |
 
 **2026-10-16实施记录：**实际实施模型为`claude-opus-5-5`，独立决策/审查模型为`claude-fable-5-1`，通过已登录的Claude Code运行。Fable先读固定代码快照形成独立意见，再与Codex交换复现和合同证据；不把中间快照缺少测试误记为最终版本缺少测试。
@@ -328,6 +329,10 @@ R1a已经区分队列条目、录音版本、load、cue和transition，采用纯
 后续R1b已完成上述自然结束修复：driver必须上报真实`element.ended`，不按接近结尾猜测；voice发出play请求后为starting，收到playing事实才为speaking。录音歌词同时检查recordingId与sourceRevision。95项测试及隔离构建通过，仍待R2/R3实际接线验证。
 
 R1c复议明确：自然耗尽保留播放意图并显示exhausted，迟到补歌可继续；用户stop/pause后不能自动响，连续失败仍有上限。A实际结束即结束preroll等待，有可用cue则顺序口播，否则直接交给B并接受真实加载状态；crossfade允许口播跨A/B，不要求A容纳整段voice，新增最小尾段预算。Fable据此撤回整段voice必须塞进A的建议。Codex根据实际源适配器证据调整身份裁决：confidence表示与目录条目的匹配把握，不等于同一已解析录音能否连续；核心按recordingId与sourceRevision判断连续，服务端在实际录音不同或无法证明连续时必须更换revision。请求播放/暂停与实际媒体确认分别处理，不能将自身延迟pause回执误认为用户暂停。
+
+完整UI接线追加裁决：歌单选择与后续条目一次替换；聊天的多字段建议先规范化，不能假设连续dispatch之间绝无媒体事实。用户已作新播放/队列决定后，迟到的破坏性聊天建议保留为文字或待显式采纳，不自动插队或开播。刷新恢复当前项在首的停止态队列，不恢复位置、历史、旧itemId或cue；恢复前不准备、不发声。上一首来自本次运行真实started历史，经新occurrence选择。电台补歌由owner应用服务负责单飞、有限重试与取消，候选仅准备一次；这明确更新了早期“ID只能由core调用工厂生成”的细节，未改变队列由core接受与管理。
+
+服务端复议采纳同origin执行器单调generation作为`/now`跨实例代际，seq只在同实例内比较，避免旧首条投影迟到取代新页；不宣称跨设备仲裁。stream的首次成功打开记录activation，未激活的过期handle拒绝；已激活的Range保留宽限，activation不算started，也不证明同一handle以后没有被重复装载。真实DJ上下文改读started并使用from/to；生成去重不能将“已生成”说成“已听到”。这些裁决仍需实现与验证，不能据文档升级为完成。
 
 R4入口裁决：复用Folia固定提交的**原生Lattice歌词canvas runtime**，不是用单词组件自行拼一个Classic舞台。独立源码仓保留许可、文件hash、窄补丁和构建来源；消除纯查找函数对i18n/React初始化的依赖。同文档adapter只接收带身份的歌词与媒体时钟，故障回退到基本歌词显示；无原始逐词时间时不做逐词扫掠，DJ字幕不交给Folia控制。iframe保留为测得隔离需要后的选项，不把它当许可证豁免或线程隔离保证。
 
@@ -372,7 +377,7 @@ R4入口裁决：复用Folia固定提交的**原生Lattice歌词canvas runtime**
 **实际讨论与裁决：** Fable首轮主张服务端programme墙钟主控；Codex首轮主张端侧媒体驱动核心。第二轮按pause/seek/缓冲/play拒绝/睡眠/A-B重叠比较后，Fable修正为端侧唯一推进者，保留服务端计划与资产准备。双方同意重建编排、保留技术工具、A/B+voice、只凭实际开始记历史、取消必须settle、启动时一次切换并删除旧编排。服务端驱动个人可暂停节目仍是技术可行路线，不将当前选择说成它不可能正确。
 
 Codex对交叉答复作了以下明确裁决，未伪造全盘一致：
-- 服务端返回聊天队列变更建议，由core接受并执行；Codex在交叉轮明确接受，不保留为分歧。core生成一次入队ID，服务端候选/prepared资产有各自ID，并回显绑定，避免同曲多次入队混淆。
+- 服务端返回聊天队列变更建议，由core接受并执行；Codex在交叉轮明确接受，不保留为分歧。早期由core生成入队ID的约定已按第6节及第9节接线裁决扩展为同owner工厂可预分配；服务端候选/prepared资产仍有独立ID并回显绑定，避免同曲多次入队混淆。
 - Fable架构R2曾偏只借设计，最终R3明确恢复reuse轮的意见：MIT窄模块可以复制并留声明。因此Aurio/SUB-WAVE源码复用已无分歧。Folia方面接受其独立固定构建落点建议，具体如下；不采用frame自行另找歌词的方案，避免与已解析录音身份分离。
 - 不采用“未知时长用文本估算就执行叠前奏”；可估预算引导生成，执行须有真实duration与可信窗口，否则顺序口播/不说。迟到cue不得改名成另一个模式再补播，只有尚有效的新transition可重新规划。
 - started幂等防重记，不防两页同时发声；采用同origin单执行者，跨设备不承诺。React外runtime须可dispose/重建，不采用不可释放的全局单例。
@@ -385,11 +390,11 @@ Fable R3最终审稿确认主路线成立、归因准确，可进入R1。其提�
 
 本文件第9节是唯一活动顺序；此前[最小改动方案快照](docs/research/product-review-2026-10-16/architecture-plan-before.md)只作历史证据，不能继续分配旧R1a/R1b任务。
 
-### 本轮实际验证
+### 架构审查时点的验证（实施进度以第9节台账为准）
 
 - 读取并固定Claudio工作树、Folia及9个新克隆仓库：Aurio、Duetto、SUB/WAVE、AutoDJ、MA、AudioMuse、Navidrome、Feishin、Lyrion。消费产品另查官方正文；不是完整市场普查。
 - 本次前端审查运行6个相关测试文件：23项通过，均为源码断言，不证明音频时序。后端审查在隔离工作目录运行server测试19项通过，并通过后端TypeScript检查；未读取项目.env/运行库。此前全仓21文件的分类与本次测试项数是不同口径，不混称全部是行为测试。
-- 尚未执行浏览器实播、Folia构建、竞品安装、账户音源验证、TTS成本/延迟测量或性能排名。本次重排后R1及以后运行闸门仍待实施/验收。
+- 架构审查当时尚未执行浏览器实播、Folia构建或竞品安装；随后实施期的合成音频浏览器验证与Folia构建见第9节。真实账户音源、TTS成本/延迟和日常听感仍未验证，未作性能排名。
 - 文档链接、模型调用真实性和业务文件未改核对见本轮核验记录。
 
 ### 证据索引（均非第二实施方案）
