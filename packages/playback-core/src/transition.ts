@@ -83,14 +83,20 @@ function skipSeekedWindow(ctx: StepContext, transition: TransitionState): void {
 /**
  * Cancel the current transition and undo its side effects: stop/abort the
  * cue, return a prerolled B to silent standby, drop an outgoing A and restore
- * the program gain. Callers decide what plays next.
+ * the program gain. Callers decide what plays next. `keepPreroll` is for a
+ * caller about to promote B itself: B keeps its pending play instead of being
+ * paused and rewound only to be played again.
  */
-export function cancelTransition(ctx: StepContext, reason: TransitionCancelReason, options: { keepUnspokenAsset: boolean }): void {
+export function cancelTransition(
+  ctx: StepContext,
+  reason: TransitionCancelReason,
+  options: { keepUnspokenAsset: boolean; keepPreroll?: boolean }
+): void {
   const { s } = ctx;
   const transition = s.transition;
   if (!transition) return;
   cancelCue(ctx, options);
-  if (transition.phase === "prerolling") {
+  if (transition.phase === "prerolling" && !options.keepPreroll) {
     const standby = deckHoldingItem(ctx, transition.toItemId);
     if (standby && standby.role === "standby") holdDeck(ctx, standby);
   }
@@ -119,7 +125,10 @@ export function degradeToDirect(ctx: StepContext, transition: TransitionState, r
 /**
  * Start a talk-over-crossfade when A reaches its anchor and both the cue and
  * B are ready. B prerolls at zero gain; it becomes program output only when
- * its own `playing` is confirmed. Unknown A duration ⇒ no anchor ⇒ the mode
+ * its own `playing` is confirmed, and A's end is the deadline for that. The
+ * voice may run on past A's end over B; it does not have to fit into A. With
+ * less than minCrossfadeTailMs of A left there is no tail to fade, so the
+ * hand-over waits for A's end. Unknown A duration ⇒ no anchor ⇒ the mode
  * degrades at A's end instead of guessing.
  */
 export function maybeStartCrossfade(ctx: StepContext): void {
@@ -131,9 +140,11 @@ export function maybeStartCrossfade(ctx: StepContext): void {
   const deckA = s.decks[program.deck];
   if (deckA.status !== "playing" || deckA.duration.kind !== "known") return;
   transition.anchorMs = Math.max(0, deckA.duration.ms - s.config.crossfadeLeadMs);
-  if (deckPosition(ctx, deckA) < transition.anchorMs) return;
+  const position = deckPosition(ctx, deckA);
+  if (position < transition.anchorMs) return;
   if (windowSkippedBySeek(ctx, transition)) return skipSeekedWindow(ctx, transition);
   if (!s.settings.djEnabled || !isCuePlayable(s.cue)) return;
+  if (deckA.duration.ms - position < s.config.minCrossfadeTailMs) return;
   const deckB = deckHoldingItem(ctx, transition.toItemId);
   if (!deckB || deckB.role !== "standby" || !readinessAtLeast(deckB.readiness, "can-play")) return;
   transition.phase = "prerolling";

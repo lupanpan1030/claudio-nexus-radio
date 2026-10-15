@@ -1,7 +1,7 @@
 import { asId, type ErrorInfo, type HistoryOutcome, type IdempotencyKey, type QueueItemId } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { finishCue, isCuePlayable, pauseCue, startCue } from "./cue.js";
-import { deckById, deckHoldingItem, deckWithRole, idleDeck, loadDeck, pauseDeck, playDeck, setGain, unloadDeck } from "./decks.js";
+import { deckById, deckHoldingItem, deckWithRole, holdDeck, idleDeck, loadDeck, pauseDeck, playDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics, requestLyrics } from "./lyrics.js";
 import { dropPrep, ensureResolved } from "./prep.js";
 import { findEntry, nextEntry, pushHistory, removeEntry } from "./queue.js";
@@ -74,6 +74,7 @@ function releaseReservation(ctx: StepContext, itemId: QueueItemId): void {
 /**
  * Started rule: committed program item AND the same load confirmed playing
  * while the transport intends to play. Order of the two conditions is free.
+ * A `playing` that predates a pause the core still awaits confirms nothing.
  * Emits at most one receipt per item and consumes its queue entry.
  */
 export function checkStarted(ctx: StepContext): void {
@@ -81,7 +82,7 @@ export function checkStarted(ctx: StepContext): void {
   const program = s.program;
   if (!program || program.started || program.deck === null || s.intent !== "play") return;
   const deck = deckById(ctx, program.deck);
-  if (deck.role !== "program" || deck.status !== "playing" || deck.itemId !== program.item.itemId) return;
+  if (deck.role !== "program" || deck.status !== "playing" || deck.pauseAwaited || deck.itemId !== program.item.itemId) return;
   if (deck.loadId === null || deck.media === null) return;
   program.started = true;
   removeEntry(s, program.item.itemId);
@@ -191,14 +192,16 @@ export function advance(ctx: StepContext, outcome: HistoryOutcome, target?: Queu
   const { s } = ctx;
   const transition = s.transition;
   if (transition && transition.phase !== "completed") {
-    cancelTransition(ctx, outcome === "played" ? "queue-changed" : "skip", { keepUnspokenAsset: false });
+    // Skipping to the very B that is prerolling promotes it as is.
+    const keepPreroll = transition.phase === "prerolling" && (target ?? nextEntry(s))?.item.itemId === transition.toItemId;
+    cancelTransition(ctx, outcome === "played" ? "queue-changed" : "skip", { keepUnspokenAsset: false, keepPreroll });
   }
   const outgoing = deckWithRole(ctx, "outgoing");
   if (outgoing) unloadDeck(ctx, outgoing);
   retireProgram(ctx, outcome);
   const next = target ?? nextEntry(s);
   if (!next) {
-    s.intent = "stop";
+    // Running out is not a stop: the intent stays, so the next enqueue starts by itself.
     ctx.note("decision", "queue exhausted");
     return;
   }
@@ -212,7 +215,19 @@ export function onProgramEnded(ctx: StepContext): void {
   const transition = s.transition;
   if (!program) return;
   if (transition && transition.fromItemId === program.item.itemId) {
-    if (transition.phase === "prerolling") return; // B commits when its playing is confirmed
+    if (transition.phase === "prerolling") {
+      // A's end is the preroll deadline: B never confirmed playing within the lead.
+      if (s.settings.djEnabled && isCuePlayable(s.cue)) {
+        const deckB = deckHoldingItem(ctx, transition.toItemId);
+        if (deckB) holdDeck(ctx, deckB);
+        startTalking(ctx, transition);
+        return;
+      }
+      // No voice to wait for: B, already asked to play, becomes program as it is.
+      degradeToDirect(ctx, transition, "B not confirmed playing by A's end");
+      completeAndAdvance(ctx);
+      return;
+    }
     if (transition.phase === "planned") {
       const cue = s.cue;
       const skipped = windowSkippedBySeek(ctx, transition);
@@ -318,11 +333,13 @@ export function failProgram(ctx: StepContext, error: ErrorInfo): void {
   if (outgoing) unloadDeck(ctx, outgoing);
   retireProgram(ctx, "failed");
   const next = nextEntry(s);
-  if (next && s.intent !== "stop" && s.consecutiveFailures < s.config.maxConsecutiveFailures) {
+  if (s.intent !== "stop" && s.consecutiveFailures < s.config.maxConsecutiveFailures) {
+    if (!next) return ctx.note("decision", `item failed (${error.code}); queue exhausted`);
     ctx.note("decision", `item failed (${error.code}); advancing`);
     activateProgram(ctx, next);
     return;
   }
+  // The bound also covers refills: failures only reset on a started item.
   s.intent = "stop";
   ctx.note("decision", `item failed (${error.code}); stopping`);
 }

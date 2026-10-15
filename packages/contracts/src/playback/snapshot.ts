@@ -22,8 +22,10 @@ export type RuntimeClockMs = number;
  *  requested: item chosen, source not resolved yet
  *  loading:   media loading on a deck, not yet confirmed playing
  *  blocked:   play() rejected (e.g. autoplay policy); needs a user gesture
+ *  exhausted: the queue ran out while the listener still wants playback; the
+ *             next enqueued item starts on its own (a refill is the app's job)
  */
-export type TransportStatus = "idle" | "requested" | "loading" | "playing" | "waiting" | "paused" | "blocked" | "failed";
+export type TransportStatus = "idle" | "requested" | "loading" | "playing" | "waiting" | "paused" | "blocked" | "failed" | "exhausted";
 
 export type DeckRole = "program" | "standby" | "outgoing" | "idle";
 

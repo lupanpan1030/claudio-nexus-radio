@@ -1,5 +1,6 @@
 import { trackDisplayDecoder, trackRefDecoder, type TrackDisplay, type TrackRef } from "../catalog.js";
 import type { ExecutorInstanceId, QueueItemId } from "../ids.js";
+import type { TransportStatus } from "../playback/snapshot.js";
 import { boolean, id, isoTimestamp, literal, nullable, number, object, type Decoder } from "../validation.js";
 import { protocolVersionDecoder, type ProtocolVersion } from "./common.js";
 
@@ -12,7 +13,7 @@ export interface NowProjectionV1 {
   readonly executorInstanceId: ExecutorInstanceId;
   readonly seq: number;
   readonly observedAt: string;
-  readonly transport: "idle" | "requested" | "loading" | "playing" | "waiting" | "paused" | "blocked" | "failed";
+  readonly transport: TransportStatus;
   readonly item: { readonly itemId: QueueItemId; readonly track: TrackRef; readonly display: TrackDisplay | null } | null;
   readonly positionMs: number | null;
   readonly nextItemId: QueueItemId | null;
@@ -24,7 +25,7 @@ export const nowProjectionV1Decoder: Decoder<NowProjectionV1> = object<NowProjec
   executorInstanceId: id<ExecutorInstanceId>(),
   seq: number({ min: 0, integer: true }),
   observedAt: isoTimestamp,
-  transport: literal("idle", "requested", "loading", "playing", "waiting", "paused", "blocked", "failed"),
+  transport: literal("idle", "requested", "loading", "playing", "waiting", "paused", "blocked", "failed", "exhausted"),
   item: nullable(
     object<NonNullable<NowProjectionV1["item"]>>({
       itemId: id<QueueItemId>(),

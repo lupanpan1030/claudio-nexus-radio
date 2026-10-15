@@ -48,7 +48,9 @@ export type PlaybackEffect =
   | { readonly type: "operation.cancel"; readonly opId: OperationId; readonly kind: OperationKind }
   | { readonly type: "deck.load"; readonly deck: DeckId; readonly loadId: LoadId; readonly itemId: QueueItemId; readonly media: ResolvedMedia; readonly startAtMs: number }
   | { readonly type: "deck.play"; readonly deck: DeckId; readonly loadId: LoadId }
+  /** The resulting `paused` fact (if the element was not already paused) carries requested=true. */
   | { readonly type: "deck.pause"; readonly deck: DeckId; readonly loadId: LoadId }
+  /** Answered by a `seeked` fact, also when the executor had to defer it until metadata. */
   | { readonly type: "deck.seek"; readonly deck: DeckId; readonly loadId: LoadId; readonly positionMs: number }
   | { readonly type: "deck.gain"; readonly deck: DeckId; readonly loadId: LoadId; readonly gain: number; readonly rampMs: number }
   | { readonly type: "deck.unload"; readonly deck: DeckId; readonly loadId: LoadId }

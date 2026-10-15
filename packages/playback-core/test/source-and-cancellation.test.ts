@@ -88,6 +88,55 @@ test("refreshing an expired URL of the same recording keeps position, lyrics and
   assert.equal(sim.receipts().length, 1);
 });
 
+test("an unverified recording refreshed under the same recording id and revision is the same source", () => {
+  const sim = new Sim();
+  const [a, b] = sim.enqueue("a", "b");
+  sim.cmd({ type: "resume" });
+  sim.resolve(a!, { confidence: "unverified" });
+  sim.deck(a!, { kind: "playing", positionMs: 0 });
+  const lyricsRequest = sim.lastEffect("lyrics.request", (e) => e.itemId === a);
+  sim.fact({
+    type: "lyrics.result",
+    opId: lyricsRequest.opId,
+    itemId: a!,
+    sourceRevision: lyricsRequest.sourceRevision,
+    result: { status: "available", asset: lyricsFor(lyricsRequest.sourceRevision, lyricsRequest.recordingId) }
+  });
+  sim.resolve(b!);
+  sim.cueReady();
+  const cueBefore = sim.snap.voice?.cueId;
+  sim.deck(a!, { kind: "time", positionMs: 42_000, rate: 1 });
+  sim.deck(a!, { kind: "error", error: { class: "expired", code: "stream_expired" } });
+  const lyricsRequests = sim.effects("lyrics.request").length;
+
+  sim.resolve(a!, { confidence: "unverified" }); // signed URL refreshed, same recording + revision
+  assert.equal(sim.lastEffect("deck.load", (e) => e.itemId === a).startAtMs, 42_000, "position kept");
+  assert.equal(sim.effects("lyrics.request").length, lyricsRequests, "lyrics kept");
+  assert.equal(sim.snap.voice?.cueId, cueBefore, "cue kept");
+  sim.deck(a!, { kind: "playing", positionMs: 42_000 });
+  const display = sim.snap.display;
+  assert.ok(display.kind === "music" && display.lyrics.status === "available");
+  assert.equal(sim.receipts().length, 1);
+});
+
+test("same recording id with a new revision, or a new recording id under the same revision, is a different source", () => {
+  for (const changed of [{ revision: "rev-a-2" }, { recording: "rec-a-other" }]) {
+    const { sim, a } = playingWithLyricsAndCue();
+    const oldCue = sim.lastEffect("voice.load");
+    sim.deck(a, { kind: "time", positionMs: 42_000, rate: 1 });
+    sim.deck(a, { kind: "error", error: { class: "expired", code: "stream_expired" } });
+    const mark = sim.mark();
+    sim.resolve(a, changed);
+    const label = JSON.stringify(changed);
+    assert.equal(sim.lastEffect("deck.load", (e) => e.itemId === a).startAtMs, 0, `${label}: position reset`);
+    assert.ok(sim.effects("voice.stop", mark).some((e) => e.voiceLoadId === oldCue.voiceLoadId), `${label}: cue cancelled`);
+    assert.notEqual(sim.snap.transition?.cueId, oldCue.cueId, label);
+    assert.equal(sim.effects("lyrics.request", mark).length, 1, `${label}: lyrics requested again`);
+    const display = sim.snap.display;
+    assert.ok(display.kind === "music" && display.lyrics.status === "loading", `${label}: old lyrics not shown`);
+  }
+});
+
 test("lyrics for another revision are never shown", () => {
   const sim = new Sim({}, { djEnabled: false });
   const [a] = sim.enqueue("a");

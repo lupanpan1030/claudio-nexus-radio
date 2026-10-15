@@ -1,4 +1,4 @@
-import { DECK_IDS, extrapolatePosition, type DeckId, type DeckRole, type LoadId, type QueueItemId, type ResolvedMedia } from "@claudio/contracts";
+import { DECK_IDS, extrapolatePosition, readinessAtLeast, type DeckId, type DeckRole, type LoadId, type QueueItemId, type ResolvedMedia } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { resetDeck, type DeckState } from "./state.js";
 
@@ -48,7 +48,9 @@ export function loadDeck(
     clock: null,
     duration: options.media.duration,
     gain: options.gain,
-    wantPlaying: options.wantPlaying
+    wantPlaying: options.wantPlaying,
+    pauseAwaited: false,
+    seekPendingMs: null
   } satisfies Partial<DeckState>);
   ctx.emit({ type: "deck.load", deck: deck.id, loadId, itemId: options.itemId, media: options.media, startAtMs: options.startAtMs });
   ctx.emit({ type: "deck.gain", deck: deck.id, loadId, gain: options.gain, rampMs: 0 });
@@ -58,12 +60,27 @@ export function loadDeck(
 export function playDeck(ctx: StepContext, deck: DeckState): void {
   if (deck.loadId === null) return;
   deck.wantPlaying = true;
-  if (ctx.s.intent === "play") ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId });
+  if (ctx.s.intent === "play") requestPlay(ctx, deck);
+}
+
+export function requestPlay(ctx: StepContext, deck: DeckState): void {
+  if (deck.loadId === null) return;
+  ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId });
 }
 
 export function pauseDeck(ctx: StepContext, deck: DeckState): void {
   if (deck.loadId === null) return;
+  // A deck seen running owes one `paused`; earlier facts until then predate this pause.
+  if (deck.status === "playing" || deck.status === "waiting") deck.pauseAwaited = true;
   ctx.emit({ type: "deck.pause", deck: deck.id, loadId: deck.loadId });
+}
+
+export function seekDeck(ctx: StepContext, deck: DeckState, positionMs: number): void {
+  if (deck.loadId === null) return;
+  // Without metadata the element fires no `seeked` to wait for (nothing has played yet either).
+  deck.seekPendingMs = readinessAtLeast(deck.readiness, "metadata") ? positionMs : null;
+  deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
+  ctx.emit({ type: "deck.seek", deck: deck.id, loadId: deck.loadId, positionMs });
 }
 
 export function setGain(ctx: StepContext, deck: DeckState, gain: number, rampMs: number): void {
@@ -79,5 +96,5 @@ export function holdDeck(ctx: StepContext, deck: DeckState): void {
   deck.role = "standby";
   pauseDeck(ctx, deck);
   setGain(ctx, deck, 0, 0);
-  ctx.emit({ type: "deck.seek", deck: deck.id, loadId: deck.loadId, positionMs: 0 });
+  seekDeck(ctx, deck, 0);
 }

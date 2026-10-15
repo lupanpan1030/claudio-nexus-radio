@@ -83,7 +83,7 @@ test("voice clock uses the applied playbackRate from the first playing; pause/re
   const held = sim.snap.voice!.clock!;
   assert.equal(held.rate, 0);
   assert.equal(held.positionMs, 1250);
-  sim.voice({ kind: "paused", positionMs: 1260, atEnd: false });
+  sim.voice({ kind: "paused", positionMs: 1260, atEnd: false, requested: true });
   sim.tick(5000);
   sim.voice({ kind: "time", positionMs: 1260, rate: 1.25 });
   assert.equal(extrapolatePosition(sim.snap.voice!.clock!, sim.now), 1260, "a late timeupdate does not restart the clock");

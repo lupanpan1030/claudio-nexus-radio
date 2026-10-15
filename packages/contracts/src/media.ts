@@ -4,9 +4,11 @@ import type { DurationInfo } from "./timing.js";
 import { boolean, id, literal, object, type Decoder } from "./validation.js";
 
 /**
- * How strongly the resolver can vouch that this recording is the one the
- * catalog entry meant. "unverified" recordings still play but never inherit
- * lyrics/cues from another revision.
+ * How strongly the resolver can vouch that the recording it actually resolved
+ * is the one the catalog entry meant. It says nothing about continuity between
+ * two resolutions: that is what `sourceRevision` carries. "unverified" media
+ * plays normally; a refreshed URL of the same recording under the same
+ * revision is still the same source.
  */
 export type RecordingConfidence = "provider-asserted" | "content-hash" | "unverified";
 
@@ -22,9 +24,11 @@ export interface MediaCapabilities {
 }
 
 /**
- * Result of resolving a TrackRef for playback. A refreshed signed URL keeps
- * the sourceRevision; a different (or unprovable) recording must get a new
- * sourceRevision, which invalidates lyrics and narration cues bound to it.
+ * Result of resolving a TrackRef for playback. A refreshed signed URL of the
+ * same recording keeps the sourceRevision. When the resolved recording changed
+ * or its continuity cannot be proven, the server must mint a new
+ * sourceRevision (and never bind one revision to two recordings); the client
+ * cannot inspect content and trusts recordingId + sourceRevision alone.
  */
 export interface ResolvedMedia {
   readonly track: TrackRef;
@@ -57,14 +61,13 @@ export function raiseReadiness(actual: MediaReadiness, observed: MediaReadiness)
 
 /**
  * Same recording AND same revision: the new media may keep lyrics, cues and
- * the playback position. Anything else is a different source.
+ * the playback position. Anything else (another revision of the same
+ * recording id, or another recording under the same revision) is a different
+ * source. Confidence is deliberately not part of this: it describes the match
+ * to the catalog, not continuity (see RecordingConfidence).
  */
 export function isSameSource(a: ResolvedMedia, b: ResolvedMedia): boolean {
-  return (
-    a.sourceRevision === b.sourceRevision &&
-    a.recording.recordingId === b.recording.recordingId &&
-    b.recording.confidence !== "unverified"
-  );
+  return a.sourceRevision === b.sourceRevision && a.recording.recordingId === b.recording.recordingId;
 }
 
 export const recordingIdentityDecoder: Decoder<RecordingIdentity> = object<RecordingIdentity>({

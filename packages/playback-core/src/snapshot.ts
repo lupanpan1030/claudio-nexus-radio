@@ -32,7 +32,11 @@ function deckSnapshot(deck: DeckView): DeckSnapshot {
 export function transportOf(state: PlaybackState): TransportStatus {
   if (state.blocked) return "blocked";
   const program = state.program;
-  if (!program) return state.lastFailure ? "failed" : "idle";
+  if (!program) {
+    // Ran out while playback is still wanted: "played out, waiting for more", never a fake loading.
+    if (state.intent === "play" && state.queue.length === 0) return "exhausted";
+    return state.lastFailure ? "failed" : "idle";
+  }
   if (state.intent === "pause") return "paused";
   const cue = state.cue;
   // While A is over and the DJ talks, the voice element is program output: only its confirmed `playing` is playing.

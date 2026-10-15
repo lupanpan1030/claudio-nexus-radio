@@ -9,6 +9,11 @@ export type DeckId = "A" | "B";
 
 export const DECK_IDS: readonly DeckId[] = ["A", "B"];
 
+/**
+ * Why play() was refused. "aborted" (AbortError) answers a play that a
+ * pause()/load() interrupted; an executor does not report the ones its own
+ * pause()/unload caused, because they answer a request already superseded.
+ */
 export type PlayRejection = "not-allowed" | "aborted" | "unsupported" | "unknown";
 
 /**
@@ -31,8 +36,20 @@ export type MediaEvent =
    * Browsers pause at the natural end before firing `ended`, so atEnd=true is
    * the end arriving, not an interruption. Never inferred from position vs duration:
    * a real pause just before the end must still count as a pause.
+   *
+   * `requested` is true when this event answers the executor's own pause()
+   * call for a deck.pause/voice.pause effect. pause() on an already paused
+   * element fires nothing, so the executor counts only calls it made while
+   * `element.paused` was false and consumes one per `pause` event. Such an
+   * event may arrive after a later play request; it is never an interruption.
+   * false = the platform/OS/another agent paused the element.
    */
-  | { readonly kind: "paused"; readonly positionMs: number; readonly atEnd: boolean }
+  | { readonly kind: "paused"; readonly positionMs: number; readonly atEnd: boolean; readonly requested: boolean }
+  /**
+   * Answers a deck.seek. Every deck.seek on an element that has metadata is
+   * followed by one `seeked` (the last one when seeks overlap); until it
+   * arrives the core treats position/`ended` reports as pre-seek.
+   */
   | { readonly kind: "seeked"; readonly positionMs: number }
   | { readonly kind: "time"; readonly positionMs: number; readonly rate: number }
   | { readonly kind: "ended" }

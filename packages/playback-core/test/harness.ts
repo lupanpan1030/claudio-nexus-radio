@@ -8,6 +8,7 @@ import {
   type PlaybackEffect,
   type PlaybackFact,
   type QueueItemId,
+  type RecordingConfidence,
   type ResolvedMedia,
   type TrackRef
 } from "@claudio/contracts";
@@ -19,12 +20,19 @@ export function track(name: string, providerId = "fixture"): TrackRef {
 
 export function media(
   ref: TrackRef,
-  options: { recording?: string; revision?: string; durationMs?: number | null; expiresAt?: number | null; seekable?: boolean } = {}
+  options: {
+    recording?: string;
+    revision?: string;
+    confidence?: RecordingConfidence;
+    durationMs?: number | null;
+    expiresAt?: number | null;
+    seekable?: boolean;
+  } = {}
 ): ResolvedMedia {
   const durationMs = options.durationMs === undefined ? 200_000 : options.durationMs;
   return {
     track: ref,
-    recording: { recordingId: asId(options.recording ?? `rec-${ref.mediaId}`), confidence: "provider-asserted" },
+    recording: { recordingId: asId(options.recording ?? `rec-${ref.mediaId}`), confidence: options.confidence ?? "provider-asserted" },
     sourceRevision: asId(options.revision ?? `rev-${ref.mediaId}-1`),
     stream: { handle: asId(`handle-${ref.mediaId}-${options.revision ?? 1}`), expiresAt: options.expiresAt ?? null },
     duration: durationMs === null ? { kind: "unknown" } : { kind: "known", ms: durationMs, source: "provider-metadata" },
@@ -169,12 +177,12 @@ export class Sim {
 
   /** What a browser reports at a natural end (measured in Chromium): `pause` with element.ended=true, then `ended`. */
   naturalEnd(itemId: QueueItemId, positionMs = 200_000): StepResult {
-    this.deck(itemId, { kind: "paused", positionMs, atEnd: true });
+    this.deck(itemId, { kind: "paused", positionMs, atEnd: true, requested: false });
     return this.deck(itemId, { kind: "ended" });
   }
 
   voiceNaturalEnd(positionMs = 4000): StepResult {
-    this.voice({ kind: "paused", positionMs, atEnd: true });
+    this.voice({ kind: "paused", positionMs, atEnd: true, requested: false });
     return this.voice({ kind: "ended" });
   }
 

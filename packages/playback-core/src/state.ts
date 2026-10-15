@@ -40,6 +40,12 @@ export interface CoreConfig {
   readonly underVoiceGain: number;
   /** Ramp duration for duck/fade gain changes. */
   readonly fadeMs: number;
+  /**
+   * Least A time that must remain for a talk-over-crossfade to begin; with
+   * less, the hand-over waits for A's end (sequential talk or direct).
+   * Defaults to the effective fadeMs when not configured.
+   */
+  readonly minCrossfadeTailMs: number;
   /** Ramp used to re-anchor gains after resume (old automation was cancelled). */
   readonly resumeRampMs: number;
   /** Consecutive item failures before auto-advance stops. */
@@ -60,6 +66,7 @@ export const DEFAULT_CORE_CONFIG: CoreConfig = Object.freeze({
   duckGain: 0.3,
   underVoiceGain: 0.3,
   fadeMs: 1500,
+  minCrossfadeTailMs: 1500,
   resumeRampMs: 250,
   maxConsecutiveFailures: 3,
   maxRefreshAttempts: 1,
@@ -87,6 +94,17 @@ export interface DeckState {
   gain: number;
   /** Whether this deck should sound while the transport is playing. */
   wantPlaying: boolean;
+  /**
+   * The core asked a deck it had seen playing/waiting to pause, and that
+   * `paused` has not arrived. Media facts are ordered per element, so a
+   * playing/waiting reported meanwhile happened before the pause and confirms nothing.
+   */
+  pauseAwaited: boolean;
+  /**
+   * Target of a deck.seek whose `seeked` has not arrived. Positions and
+   * `ended` reported meanwhile describe the element before the seek.
+   */
+  seekPendingMs: number | null;
 }
 
 export interface ProgramState {
@@ -207,7 +225,9 @@ function idleDeck(id: DeckId): DeckState {
     clock: null,
     duration: { kind: "unknown" },
     gain: 1,
-    wantPlaying: false
+    wantPlaying: false,
+    pauseAwaited: false,
+    seekPendingMs: null
   };
 }
 
@@ -221,7 +241,7 @@ export function createInitialState(options: {
 } = {}): PlaybackState {
   const state: CoreState = {
     version: 0,
-    config: { ...DEFAULT_CORE_CONFIG, ...options.config },
+    config: resolveConfig(options.config ?? {}),
     intent: "stop",
     blocked: false,
     queue: [],
@@ -241,6 +261,35 @@ export function createInitialState(options: {
     lastFailure: null
   };
   return deepFreeze(state);
+}
+
+const CONFIG_RANGES: Readonly<Record<Exclude<keyof CoreConfig, "preferredTalkMode">, readonly [min: number, max: number, integer: boolean]>> = {
+  crossfadeLeadMs: [0, Infinity, false],
+  duckGain: [0, 1, false],
+  underVoiceGain: [0, 1, false],
+  fadeMs: [0, Infinity, false],
+  minCrossfadeTailMs: [0, Infinity, false],
+  resumeRampMs: [0, Infinity, false],
+  maxConsecutiveFailures: [1, Infinity, true],
+  maxRefreshAttempts: [0, Infinity, true],
+  historyLimit: [1, Infinity, true],
+  receiptLimit: [1, Infinity, true]
+};
+
+/** Defaults plus overrides; a non-finite or out-of-range value is a programming error and throws. */
+function resolveConfig(overrides: Partial<CoreConfig>): CoreConfig {
+  const fadeMs = overrides.fadeMs ?? DEFAULT_CORE_CONFIG.fadeMs;
+  const config: CoreConfig = { ...DEFAULT_CORE_CONFIG, ...overrides, minCrossfadeTailMs: overrides.minCrossfadeTailMs ?? fadeMs };
+  if (config.preferredTalkMode !== "sequential-talk" && config.preferredTalkMode !== "talk-over-crossfade") {
+    throw new RangeError(`invalid core config preferredTalkMode: ${String(config.preferredTalkMode)}`);
+  }
+  for (const [key, [min, max, integer]] of Object.entries(CONFIG_RANGES)) {
+    const value = config[key as keyof typeof CONFIG_RANGES];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+      throw new RangeError(`invalid core config ${key}: ${String(value)}`);
+    }
+  }
+  return config;
 }
 
 /**

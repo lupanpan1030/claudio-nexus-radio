@@ -14,7 +14,7 @@ import {
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { isVoiceActive, isVoiceExpired, markCueReady, pauseCue, voiceRate } from "./cue.js";
-import { deckPosition, unloadDeck } from "./decks.js";
+import { deckPosition, holdDeck, pauseDeck, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { refreshSource } from "./prep.js";
 import {
@@ -93,22 +93,28 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
       return onDeckPlaying(ctx, deck, event.positionMs);
     case "waiting":
       if (deck.status === "ended") return duplicate(ctx, "waiting after ended");
+      if (deck.pauseAwaited) return stale(ctx, `deck ${deckId} waiting from before the requested pause`);
       deck.status = "waiting";
-      deck.clock = { positionMs: event.positionMs, observedAt: at, rate: 0 };
+      deck.clock = { positionMs: deck.seekPendingMs ?? event.positionMs, observedAt: at, rate: 0 };
       return "applied";
     case "stalled":
       // Stalled may still have buffered data; not a pause.
       return "applied";
     case "paused":
-      return onDeckPaused(ctx, deck, event.positionMs, event.atEnd);
+      return onDeckPaused(ctx, deck, event);
     case "seeked":
+      deck.seekPendingMs = null;
       deck.clock = { positionMs: event.positionMs, observedAt: at, rate: deck.status === "playing" ? (deck.clock?.rate || 1) : 0 };
       return "applied";
     case "time":
+      // A position from before the pending seek must not reopen a window the seek left.
+      if (deck.seekPendingMs !== null) return stale(ctx, `deck ${deckId} time from before the pending seek`);
       deck.clock = { positionMs: event.positionMs, observedAt: at, rate: deck.status === "playing" ? event.rate : 0 };
       if (deck.role === "program") maybeStartCrossfade(ctx);
       return "applied";
     case "ended":
+      // Seeking clears `ended`; an end reported before the seek landed is the old position's.
+      if (deck.seekPendingMs !== null) return stale(ctx, `deck ${deckId} ended from before the pending seek`);
       return onDeckEnded(ctx, deck);
     case "play-rejected":
       return onDeckRejected(ctx, deck, event.reason);
@@ -122,15 +128,27 @@ function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): F
   if (deck.status === "ended" && deck.loadId !== null) {
     // Only a seek or a new load revives an ended deck; a stray `playing` (late
     // event, media key on the finished element) is silenced, not made program output.
-    ctx.emit({ type: "deck.pause", deck: deck.id, loadId: deck.loadId });
+    pauseDeck(ctx, deck);
     return duplicate(ctx, `deck ${deck.id} playing after ended`);
   }
+  // Per-element order: this happened before the pause the core asked for, so it confirms nothing.
+  if (deck.pauseAwaited) return stale(ctx, `deck ${deck.id} playing from before the requested pause`);
   deck.status = "playing";
   deck.readiness = raiseReadiness(deck.readiness, "can-play");
-  deck.clock = { positionMs, observedAt: ctx.now, rate: 1 };
-  if (s.intent !== "play" && deck.loadId !== null) {
+  const pending = deck.seekPendingMs;
+  deck.clock = { positionMs: pending ?? positionMs, observedAt: ctx.now, rate: pending === null ? 1 : 0 };
+  const transition = s.transition;
+  const prerolled = deck.wantPlaying && transition?.phase === "prerolling" && transition.toItemId === deck.itemId;
+  if (deck.role === "standby" && !prerolled) {
+    // Nobody asked this standby to play: silence and rewind it, so it cannot
+    // drift on unheard and later be promoted mid-track as if it had started.
+    ctx.note("decision", `unrequested playing on standby deck ${deck.id}; held at its start`);
+    holdDeck(ctx, deck);
+    return "applied";
+  }
+  if (s.intent !== "play") {
     // Late `playing` after a pause/stop intent: enforce the intent again.
-    ctx.emit({ type: "deck.pause", deck: deck.id, loadId: deck.loadId });
+    pauseDeck(ctx, deck);
     return "applied";
   }
   if (deck.role === "program") {
@@ -141,28 +159,28 @@ function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): F
     maybeStartCrossfade(ctx);
     return "applied";
   }
-  const transition = s.transition;
-  if (deck.role === "standby" && transition?.phase === "prerolling" && transition.toItemId === deck.itemId) {
-    commitOverlap(ctx);
-  }
-  // A standby deck playing outside a preroll is silent (gain 0) and never counts as started.
+  if (prerolled) commitOverlap(ctx);
   return "applied";
 }
 
-function onDeckPaused(ctx: StepContext, deck: DeckState, positionMs: number, atEnd: boolean): FactResult {
+function onDeckPaused(ctx: StepContext, deck: DeckState, event: Extract<MediaEvent, { kind: "paused" }>): FactResult {
   const { s } = ctx;
+  deck.pauseAwaited = false;
   if (deck.status === "ended") return duplicate(ctx, "paused after ended");
-  if (atEnd) {
+  const clock = { positionMs: deck.seekPendingMs ?? event.positionMs, observedAt: ctx.now, rate: 0 };
+  if (event.atEnd) {
     // Natural end: the element pauses right before `ended`. Not an interruption; `ended` decides.
-    deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
+    deck.clock = clock;
     return "applied";
   }
-  const wasPlaying = deck.status === "playing" || deck.status === "waiting";
   deck.status = "paused";
-  deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
-  // An external pause of program output (OS/media interruption) becomes a transport pause,
-  // so the voice stops with the music.
-  if (wasPlaying && deck.role === "program" && s.intent === "play" && deck.wantPlaying) {
+  deck.clock = clock;
+  // The core's own pause may land after a later play request (hold → promote → play):
+  // it answers a superseded request and is never an interruption.
+  if (event.requested) return "applied";
+  // An external pause of output that should sound (OS/media interruption) becomes a
+  // transport pause, so the voice stops with the music and resume restarts both.
+  if (deck.role === "program" && s.intent === "play" && deck.wantPlaying) {
     ctx.note("decision", "external pause of program deck; pausing transport");
     pauseTransport(ctx);
   }
@@ -173,6 +191,7 @@ function onDeckEnded(ctx: StepContext, deck: DeckState): FactResult {
   if (deck.status === "ended") return duplicate(ctx, `deck ${deck.id} ended twice`);
   deck.status = "ended";
   deck.wantPlaying = false;
+  deck.pauseAwaited = false;
   if (deck.clock) deck.clock = { ...deck.clock, rate: 0 };
   if (deck.role === "program") onProgramEnded(ctx);
   else if (deck.role === "outgoing") {
@@ -277,8 +296,8 @@ function onPrepareResolved(ctx: StepContext, fact: Extract<PlaybackFact, { type:
 }
 
 /**
- * A different (or unprovable) recording replaced the source: lyrics for the
- * old revision are dropped and any transition/cue bound to the item is cancelled.
+ * Another recording id or revision replaced the source: lyrics for the old
+ * one are dropped and any transition/cue bound to the item is cancelled.
  */
 function onSourceChanged(ctx: StepContext, itemId: QueueItemId, media: ResolvedMedia): void {
   const { s } = ctx;
@@ -291,7 +310,7 @@ function onSourceChanged(ctx: StepContext, itemId: QueueItemId, media: ResolvedM
   }
   for (const deck of Object.values(s.decks)) {
     // A preheated load of the old recording must not become program output.
-    if (deck.itemId === itemId && deck.role === "standby" && deck.media?.sourceRevision !== media.sourceRevision) unloadDeck(ctx, deck);
+    if (deck.itemId === itemId && deck.role === "standby" && deck.media && !isSameSource(deck.media, media)) unloadDeck(ctx, deck);
   }
   planAhead(ctx);
 }
@@ -425,9 +444,10 @@ function onVoiceMedia(ctx: StepContext, fact: Extract<PlaybackFact, { type: "voi
       return "applied";
     case "paused":
       cue.clock = { positionMs: event.positionMs, observedAt: at, rate: 0 };
-      // Natural end pauses before `ended`; an interruption of a voice that should
-      // sound pauses the whole transport, like the program deck.
-      if (!event.atEnd && isVoiceActive(cue) && s.intent === "play") {
+      // Natural end pauses before `ended`, and the core's own pause may land after a
+      // resume; only an interruption of a voice that should sound pauses the whole
+      // transport, like the program deck.
+      if (!event.atEnd && !event.requested && isVoiceActive(cue) && s.intent === "play") {
         ctx.note("decision", "external pause of the voice; pausing transport");
         pauseTransport(ctx);
       }
@@ -439,8 +459,13 @@ function onVoiceMedia(ctx: StepContext, fact: Extract<PlaybackFact, { type: "voi
       onCueFinished(ctx, "ended");
       return "applied";
     case "play-rejected":
+      // Only a pending voice.play can be refused; after a pause it answers a superseded request.
+      if (cue.status !== "starting") return stale(ctx, `voice play rejection (${event.reason}) for a superseded play`);
+      ctx.note("decision", `voice failed (${event.reason}); continuing music`);
+      onCueFinished(ctx, "failed");
+      return "applied";
     case "error":
-      ctx.note("decision", `voice failed (${event.kind === "error" ? event.error.code : event.reason}); continuing music`);
+      ctx.note("decision", `voice failed (${event.error.code}); continuing music`);
       onCueFinished(ctx, "failed");
       return "applied";
   }

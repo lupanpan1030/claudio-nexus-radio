@@ -141,6 +141,7 @@ test("seek after the voice started cancels it and never re-speaks that hand-over
   assert.equal(sim.snap.voice, null);
   assert.equal(sim.snap.display.kind, "music");
 
+  sim.deck(a, { kind: "seeked", positionMs: 10_000 });
   sim.deck(a, { kind: "playing", positionMs: 10_000 });
   const endMark = sim.mark();
   sim.deck(a, { kind: "ended" });
@@ -171,9 +172,15 @@ test("seek into the crossfade window: no catch-up voice, neither now nor on the 
   sim.deck(a, { kind: "playing", positionMs: 195_000 });
   sim.deck(b, { kind: "can-play", through: true });
   sim.deck(a, { kind: "time", positionMs: 197_000, rate: 1 });
+  const strayMark = sim.mark();
   sim.deck(b, { kind: "playing", positionMs: 0 });
   assert.equal(sim.snap.transition?.phase, "planned", "a stray B playing is not a crossfade");
   assert.equal(sim.snap.program?.item.itemId, a);
+  const bLoad = sim.loadOf(b);
+  assert.ok(sim.effects("deck.pause", strayMark).some((e) => e.loadId === bLoad.loadId), "unrequested standby playing is silenced");
+  assert.ok(sim.effects("deck.seek", strayMark).some((e) => e.loadId === bLoad.loadId && e.positionMs === 0), "and rewound");
+  sim.deck(b, { kind: "paused", positionMs: 300, atEnd: false, requested: true });
+  sim.deck(b, { kind: "seeked", positionMs: 0 });
   sim.deck(a, { kind: "time", positionMs: 199_500, rate: 1 });
   sim.deck(a, { kind: "ended" });
   sim.deck(b, { kind: "playing", positionMs: 0 });
@@ -233,6 +240,7 @@ test("sequential talk: a seek short of A's end keeps the window ahead; a seek to
   ahead.sim.cmd({ type: "seek", positionMs: 199_000 });
   assert.equal(ahead.sim.snap.transition?.mode, "sequential-talk");
   ahead.sim.voice({ kind: "can-play", through: true });
+  ahead.sim.deck(ahead.a, { kind: "seeked", positionMs: 199_000 });
   ahead.sim.deck(ahead.a, { kind: "playing", positionMs: 199_000 });
   assert.equal(ahead.sim.effects("voice.play", aheadMark).length, 0);
   ahead.sim.deck(ahead.a, { kind: "ended" });
@@ -244,6 +252,7 @@ test("sequential talk: a seek short of A's end keeps the window ahead; a seek to
   const pastMark = past.sim.mark();
   past.sim.cmd({ type: "seek", positionMs: 250_000 });
   assert.equal(past.sim.snap.transition?.mode, "direct", "clamped to the end = window jumped over");
+  past.sim.deck(past.a, { kind: "seeked", positionMs: 200_000 });
   past.sim.deck(past.a, { kind: "ended" });
   assert.equal(past.sim.snap.program?.item.itemId, past.b);
   assert.equal(past.sim.effects("voice.play", pastMark).length, 0);
@@ -259,6 +268,7 @@ test("a voice that already spoke is not re-spoken after seeking back before the 
   const mark = sim.mark();
   sim.cmd({ type: "seek", positionMs: 100_000 });
   assert.equal(sim.snap.transition?.mode, "direct");
+  sim.deck(a, { kind: "seeked", positionMs: 100_000 });
   sim.deck(a, { kind: "playing", positionMs: 100_000 });
   sim.deck(a, { kind: "time", positionMs: 192_500, rate: 1 });
   sim.deck(a, { kind: "time", positionMs: 199_000, rate: 1 });
@@ -382,12 +392,12 @@ test("crossfade preroll rejected: A keeps playing and the hand-over degrades to 
 test("A ends during a preroll and B then fails: the hand-over still completes", () => {
   const { sim, a, b, c } = setup({ preferredTalkMode: "talk-over-crossfade" });
   sim.cueReady();
-  sim.deck(a, { kind: "time", positionMs: 199_000, rate: 1 });
+  sim.deck(a, { kind: "time", positionMs: 195_000, rate: 1 });
   assert.equal(sim.snap.transition?.phase, "prerolling");
   sim.deck(a, { kind: "ended" });
-  assert.equal(sim.snap.transition?.phase, "prerolling", "waiting for B to confirm");
+  assert.equal(sim.snap.transition?.phase, "talking", "A's end is the preroll deadline: talks instead of waiting for B");
   sim.deck(b, { kind: "error", error: { class: "invalid", code: "decode" } });
-  assert.equal(sim.snap.transition?.phase, "talking", "falls back to talking instead of stalling");
+  assert.equal(sim.snap.transition?.phase, "talking", "the held B failing does not stall the voice");
   sim.voice({ kind: "playing", positionMs: 0 });
   sim.voice({ kind: "ended" });
   assert.equal(sim.snap.program?.item.itemId, b, "B retried once as program");

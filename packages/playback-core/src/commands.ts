@@ -1,7 +1,7 @@
 import { DECK_IDS, type OperationId, type PlaybackCommand, type QueueItem, type QueueItemId, type QueueEntryRequest } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { cancelCue, resumeCue } from "./cue.js";
-import { holdDeck, setGain, unloadDeck } from "./decks.js";
+import { holdDeck, requestPlay, seekDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { dropPrep } from "./prep.js";
 import {
@@ -83,16 +83,26 @@ function select(ctx: StepContext, target: Extract<PlaybackCommand, { type: "sele
   s.blocked = false;
   const outcome = departureOutcome(ctx);
   // Retire first so the program entry disappears, then pull the target to the front.
-  if (s.transition) cancelTransition(ctx, "skip", { keepUnspokenAsset: false });
+  if (s.transition) cancelTransition(ctx, "skip", { keepUnspokenAsset: false, keepPreroll: s.transition.toItemId === itemId });
   const entry = moveToFront(s, itemId);
   if (!entry) return;
   if (s.program) advance(ctx, outcome, entry);
   else activateProgram(ctx, entry);
 }
 
+/**
+ * Adds items. If the queue ran out while the listener still wants playback
+ * (exhausted), the new head starts on its own; after an explicit pause/stop
+ * it only waits in the queue.
+ */
 function enqueue(ctx: StepContext, requests: readonly QueueEntryRequest[], position: "next" | "end"): void {
   if (requests.length === 0) return ctx.note("ignored", "nothing to enqueue");
-  insertEntries(ctx.s, requests.map((request) => createItem(ctx, request)), position, lockedIds(ctx));
+  const { s } = ctx;
+  insertEntries(s, requests.map((request) => createItem(ctx, request)), position, lockedIds(ctx));
+  if (!s.program && s.intent === "play") {
+    const head = nextEntry(s);
+    if (head) return activateProgram(ctx, head);
+  }
   planAhead(ctx);
 }
 
@@ -145,7 +155,7 @@ function resume(ctx: StepContext): void {
   for (const id of DECK_IDS) {
     const deck = s.decks[id];
     if (deck.loadId === null || !deck.wantPlaying) continue;
-    ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId });
+    requestPlay(ctx, deck);
     // Old gain automation was cancelled by pause; re-anchor to the current target.
     setGain(ctx, deck, deck.gain, s.config.resumeRampMs);
   }
@@ -171,12 +181,11 @@ function seek(ctx: StepContext, positionMs: number): void {
   const target = deck.duration.kind === "known" ? Math.min(positionMs, deck.duration.ms) : positionMs;
   if (s.transition) cancelTransition(ctx, "seek", { keepUnspokenAsset: true });
   program.seekFloorMs = target;
-  ctx.emit({ type: "deck.seek", deck: deck.id, loadId: deck.loadId, positionMs: target });
-  deck.clock = { positionMs: target, observedAt: ctx.now, rate: 0 };
+  seekDeck(ctx, deck, target);
   if (deck.status === "ended") {
     deck.status = "paused";
     deck.wantPlaying = true;
-    if (s.intent === "play") ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId });
+    if (s.intent === "play") requestPlay(ctx, deck);
   }
   planAhead(ctx);
 }

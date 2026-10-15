@@ -6,7 +6,9 @@ import {
   decode,
   isNewerPreparation,
   isNewerProjection,
+  isSameSource,
   legacySegueHint,
+  nowProjectionV1Decoder,
   lyricsMatchRecording,
   preferDuration,
   type DurationInfo,
@@ -21,7 +23,8 @@ import {
   type LyricsResponseV1,
   type PlaybackReceipt,
   type PreparationId,
-  type PreparedItemV1
+  type PreparedItemV1,
+  type ResolvedMedia
 } from "../src/index.js";
 
 const receipt: PlaybackReceipt = {
@@ -186,4 +189,36 @@ test("now projections from the same executor must be strictly newer", () => {
   };
   assert.equal(isNewerProjection(base, { ...base, seq: 4 }), false);
   assert.equal(isNewerProjection(base, { ...base, seq: 6 }), true);
+});
+
+test("the now projection carries the exhausted transport", () => {
+  const projection = {
+    protocolVersion: PROTOCOL_VERSION,
+    executorInstanceId: "exec",
+    seq: 1,
+    observedAt: "2026-10-16T01:00:00Z",
+    transport: "exhausted",
+    item: null,
+    positionMs: null,
+    nextItemId: null,
+    speaking: false
+  };
+  assert.ok(decode(nowProjectionV1Decoder, projection).ok);
+  assert.equal(decode(nowProjectionV1Decoder, { ...projection, transport: "drained" }).ok, false);
+});
+
+test("same source means same recording id and revision; confidence does not decide continuity", () => {
+  const base: ResolvedMedia = {
+    track: { providerId: asId("fixture"), mediaId: asId("m1") },
+    recording: { recordingId: asId("rec-1"), confidence: "unverified" },
+    sourceRevision: asId("rev-1"),
+    stream: { handle: asId("h-1"), expiresAt: 1 },
+    duration: { kind: "unknown" },
+    capabilities: { seekable: true, rangeRequests: true }
+  };
+  const refreshed: ResolvedMedia = { ...base, stream: { handle: asId("h-2"), expiresAt: 2 } };
+  assert.equal(isSameSource(base, refreshed), true, "refreshed URL of an unverified recording");
+  assert.equal(isSameSource(base, { ...refreshed, recording: { recordingId: asId("rec-1"), confidence: "content-hash" } }), true);
+  assert.equal(isSameSource(base, { ...refreshed, sourceRevision: asId("rev-2") }), false, "same id, new revision");
+  assert.equal(isSameSource(base, { ...refreshed, recording: { recordingId: asId("rec-2"), confidence: "unverified" } }), false, "new id, same revision");
 });

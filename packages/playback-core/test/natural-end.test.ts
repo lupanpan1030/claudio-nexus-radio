@@ -16,7 +16,7 @@ test("DJ off: natural pause(atEnd)→ended keeps playing intent and starts B", (
   const { sim, a, b } = setup(false);
   sim.deck(a, { kind: "time", positionMs: 199_500, rate: 1 });
   const mark = sim.mark();
-  sim.deck(a, { kind: "paused", positionMs: 200_000, atEnd: true });
+  sim.deck(a, { kind: "paused", positionMs: 200_000, atEnd: true, requested: false });
   assert.equal(sim.snap.transport, "playing", "the end arriving is not a transport pause");
   assert.equal(sim.effects("deck.pause", mark).length, 0);
 
@@ -40,7 +40,7 @@ test("DJ on: natural end of A → voice → natural end of voice → B, no manua
   sim.voice({ kind: "playing", positionMs: 0 });
   assert.equal(sim.snap.transport, "playing");
 
-  sim.voice({ kind: "paused", positionMs: 4000, atEnd: true });
+  sim.voice({ kind: "paused", positionMs: 4000, atEnd: true, requested: false });
   assert.equal(sim.snap.transport, "playing", "voice reaching its end is not a pause");
   assert.equal(sim.effects("voice.pause", mark).length, 0);
   sim.voice({ kind: "ended" });
@@ -54,7 +54,7 @@ test("an OS interruption close to the end is still a pause: no guessing from pos
   const { sim, a, b } = setup(false);
   sim.deck(a, { kind: "time", positionMs: 199_900, rate: 1 });
   const mark = sim.mark();
-  sim.deck(a, { kind: "paused", positionMs: 199_950, atEnd: false });
+  sim.deck(a, { kind: "paused", positionMs: 199_950, atEnd: false, requested: false });
   assert.equal(sim.snap.transport, "paused");
   assert.equal(sim.snap.program?.item.itemId, a);
   assert.equal(sim.effects("deck.play", mark).length, 0, "B does not start under an interruption");
@@ -72,7 +72,7 @@ test("user pause near the end, then the paused fact, stays paused", () => {
   const { sim, a } = setup(true);
   sim.cueReady();
   sim.cmd({ type: "pause" });
-  sim.deck(a, { kind: "paused", positionMs: 199_000, atEnd: false });
+  sim.deck(a, { kind: "paused", positionMs: 199_000, atEnd: false, requested: true });
   assert.equal(sim.snap.transport, "paused");
   assert.equal(sim.effects("voice.play").length, 0);
   assert.equal(sim.snap.transition?.phase, "planned");
@@ -86,7 +86,7 @@ test("an OS interruption of the voice pauses the transport; resume continues the
   const voiceLoad = sim.lastEffect("voice.load");
 
   const mark = sim.mark();
-  sim.voice({ kind: "paused", positionMs: 1500, atEnd: false });
+  sim.voice({ kind: "paused", positionMs: 1500, atEnd: false, requested: false });
   assert.equal(sim.snap.transport, "paused");
   assert.equal(sim.snap.voice?.status, "paused");
   assert.equal(sim.snap.program?.item.itemId, a, "B does not start while the voice is interrupted");
@@ -114,7 +114,7 @@ test("repeated ended / paused after a natural end are duplicates without effects
   dj.sim.naturalEnd(dj.a);
   const mark = dj.sim.mark();
   const ended = dj.sim.deck(dj.a, { kind: "ended" });
-  const paused = dj.sim.deck(dj.a, { kind: "paused", positionMs: 200_000, atEnd: true });
+  const paused = dj.sim.deck(dj.a, { kind: "paused", positionMs: 200_000, atEnd: true, requested: false });
   assert.equal(ended.notes[0]?.kind, "duplicate");
   assert.equal(paused.notes[0]?.kind, "duplicate");
   assert.equal(dj.sim.since(mark).length, 0);
@@ -141,7 +141,7 @@ test("a stray playing on an ended A while the DJ talks is silenced and does not 
   assert.equal(sim.snap.history.at(-1)?.outcome, "played", "A still counts as finished");
 });
 
-test("a stray playing on an ended A during a preroll is silenced; B still commits", () => {
+test("A ending during a preroll talks at once; a stray playing on the ended A is silenced", () => {
   const { sim, a, b } = (() => {
     const s = new Sim({ preferredTalkMode: "talk-over-crossfade" });
     const [a, b] = s.enqueue("a", "b");
@@ -152,13 +152,17 @@ test("a stray playing on an ended A during a preroll is silenced; B still commit
     return { sim: s, a: a!, b: b! };
   })();
   sim.cueReady();
-  sim.deck(a, { kind: "time", positionMs: 199_000, rate: 1 });
+  sim.deck(a, { kind: "time", positionMs: 195_000, rate: 1 });
   assert.equal(sim.snap.transition?.phase, "prerolling");
   sim.naturalEnd(a);
+  assert.equal(sim.snap.transition?.phase, "talking");
   const mark = sim.mark();
   sim.deck(a, { kind: "playing", positionMs: 0 });
-  assert.equal(sim.effects("deck.pause", mark).length, 1);
-  assert.equal(sim.snap.transition?.phase, "prerolling");
+  assert.deepEqual(sim.effects("deck.pause", mark).map((e) => e.loadId), [sim.loadOf(a).loadId]);
+  assert.equal(sim.snap.transition?.phase, "talking");
+  sim.voice({ kind: "playing", positionMs: 0 });
+  sim.voiceNaturalEnd();
+  sim.deck(b, { kind: "seeked", positionMs: 0 });
   sim.deck(b, { kind: "playing", positionMs: 0 });
   assert.equal(sim.snap.program?.item.itemId, b);
   assert.deepEqual(sim.receipts().map((e) => e.receipt.itemId), [a, b]);
