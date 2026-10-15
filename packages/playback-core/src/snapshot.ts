@@ -5,7 +5,7 @@ import type {
   LyricsView,
   PlaybackSnapshot,
   QueueItemId,
-  SourceRevision,
+  ResolvedMedia,
   TransportStatus,
   VoiceSnapshot
 } from "@claudio/contracts";
@@ -34,7 +34,9 @@ export function transportOf(state: PlaybackState): TransportStatus {
   const program = state.program;
   if (!program) return state.lastFailure ? "failed" : "idle";
   if (state.intent === "pause") return "paused";
-  if (state.transition?.phase === "talking" && state.cue?.status === "speaking") return "playing";
+  const cue = state.cue;
+  // While A is over and the DJ talks, the voice element is program output: only its confirmed `playing` is playing.
+  if (state.transition?.phase === "talking" && cue) return cue.status === "speaking" ? "playing" : cue.status === "waiting" ? "waiting" : "loading";
   if (program.deck === null) return "requested";
   switch (state.decks[program.deck].status) {
     case "playing":
@@ -46,16 +48,18 @@ export function transportOf(state: PlaybackState): TransportStatus {
   }
 }
 
-function lyricsFor(state: PlaybackState, itemId: QueueItemId, revision: SourceRevision | null): LyricsView {
+function lyricsFor(state: PlaybackState, itemId: QueueItemId, media: ResolvedMedia | null): LyricsView {
   const entry = state.lyrics[itemId];
-  if (!entry || revision === null || entry.sourceRevision !== revision) return { status: "none" };
+  if (!entry || !media || entry.sourceRevision !== media.sourceRevision || entry.recordingId !== media.recording.recordingId) return { status: "none" };
   return entry.view;
 }
 
 function displayOf(state: PlaybackState): DisplayItem {
   const cue = state.cue;
   const phase = state.transition?.phase;
-  if (cue && (cue.status === "speaking" || cue.status === "paused") && (phase === "talking" || phase === "overlapping")) {
+  // Subtitles switch to the voice once it was confirmed playing, not when voice.play was issued.
+  const voiceHeard = cue !== null && cue.everSpoke && (cue.status === "speaking" || cue.status === "waiting" || cue.status === "paused");
+  if (cue && voiceHeard && (phase === "talking" || phase === "overlapping")) {
     return {
       kind: "voice",
       cueId: cue.binding.cueId,
@@ -74,7 +78,7 @@ function displayOf(state: PlaybackState): DisplayItem {
     deck: deck?.id ?? null,
     loadId: deck?.loadId ?? null,
     sourceRevision: revision,
-    lyrics: lyricsFor(state, program.item.itemId, revision)
+    lyrics: lyricsFor(state, program.item.itemId, deck?.media ?? null)
   };
 }
 

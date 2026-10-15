@@ -1,4 +1,4 @@
-import { readinessAtLeast, type CueAsset, type CueBinding, type CueId, type VoiceLoadId } from "@claudio/contracts";
+import { extrapolatePosition, readinessAtLeast, type CueAsset, type CueBinding, type CueId, type VoiceLoadId } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { findEntry } from "./queue.js";
 import { pairKey, type CueState, type TransitionState } from "./state.js";
@@ -72,23 +72,46 @@ export function markCueReady(ctx: StepContext, asset: CueAsset): void {
   ctx.emit({ type: "voice.load", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId, asset });
 }
 
-export function playCue(ctx: StepContext): void {
+/** voice.play was asked for and not paused since: starting, speaking or buffering. */
+export function isVoiceActive(cue: CueState | null): boolean {
+  return cue !== null && (cue.status === "starting" || cue.status === "speaking" || cue.status === "waiting");
+}
+
+/** Rate the executor applies to this voice (contract: VoiceAsset.playbackRate). */
+export function voiceRate(cue: CueState): number {
+  return cue.asset?.voice.playbackRate ?? 1;
+}
+
+/**
+ * The transition wants the voice heard. It is only `starting` until the
+ * voice element confirms `playing`; under a transport pause it is held as
+ * `paused` and resume asks for it.
+ */
+export function startCue(ctx: StepContext): void {
   const cue = ctx.s.cue;
-  if (!cue || !cue.voiceLoadId || ctx.s.intent !== "play") return;
+  if (!cue || !cue.voiceLoadId) return;
+  if (ctx.s.intent !== "play") {
+    cue.status = "paused";
+    return;
+  }
+  cue.status = "starting";
   ctx.emit({ type: "voice.play", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId });
 }
 
+/** Also stops a voice.play that has not produced `playing` yet; a late `playing` is then silenced. */
 export function pauseCue(ctx: StepContext): void {
   const cue = ctx.s.cue;
-  if (!cue || !cue.voiceLoadId || cue.status !== "speaking") return;
+  if (!cue || !cue.voiceLoadId || !isVoiceActive(cue)) return;
   cue.status = "paused";
+  // Hold the subtitle clock where the voice is now; the `paused` fact then reports the exact position.
+  if (cue.clock) cue.clock = { positionMs: extrapolatePosition(cue.clock, ctx.now), observedAt: ctx.now, rate: 0 };
   ctx.emit({ type: "voice.pause", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId });
 }
 
 export function resumeCue(ctx: StepContext): void {
   const cue = ctx.s.cue;
   if (!cue || !cue.voiceLoadId || cue.status !== "paused") return;
-  cue.status = "speaking";
+  cue.status = "starting";
   ctx.emit({ type: "voice.play", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId });
 }
 

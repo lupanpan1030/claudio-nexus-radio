@@ -47,7 +47,7 @@ test("pause and resume never produce another receipt and re-anchor gains", () =>
   const mark = sim.mark();
   sim.cmd({ type: "pause" });
   assert.ok(sim.effects("deck.pause", mark).some((e) => e.loadId === program.loadId));
-  sim.deck(a, { kind: "paused", positionMs: 5000 });
+  sim.deck(a, { kind: "paused", positionMs: 5000, atEnd: false });
   assert.equal(sim.snap.transport, "paused");
 
   const resumeMark = sim.mark();

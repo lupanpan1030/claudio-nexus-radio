@@ -17,6 +17,7 @@ import type {
   QueueItem,
   QueueItemId,
   ReceiptStatus,
+  RecordingId,
   Reservation,
   ResolvedMedia,
   SourceRevision,
@@ -135,7 +136,9 @@ export interface TransitionState {
   cancelReason: TransitionCancelReason | null;
 }
 
+/** Lyrics request bound to the exact recording identity the program deck holds. */
 export interface LyricsState {
+  recordingId: RecordingId;
   sourceRevision: SourceRevision;
   opId: OperationId | null;
   view: LyricsView;
@@ -240,25 +243,48 @@ export function createInitialState(options: {
   return deepFreeze(state);
 }
 
-/** Plain-data deep clone (state holds only JSON-like values). */
+/**
+ * Working copy for one step. Every partition the core edits in place (queue
+ * entries, program, decks, prep, transition, cue, lyrics entries, records,
+ * settings) is copied one level deep; payloads it only ever replaces
+ * wholesale (queue items, resolved media, cue/lyrics assets, lyrics views,
+ * clock samples, durations, errors, history entries, config, reusable cue)
+ * are shared by reference. The input is frozen, so an in-place edit of a
+ * shared payload throws instead of leaking into the previous state.
+ */
 export function cloneState(state: PlaybackState): CoreState {
-  return cloneValue(state) as CoreState;
+  const s = state as unknown as CoreState;
+  return {
+    ...s,
+    queue: s.queue.map((entry) => ({ ...entry })),
+    history: [...s.history],
+    program: s.program && { ...s.program },
+    decks: { A: { ...s.decks.A }, B: { ...s.decks.B } },
+    prep: copyRecord(s.prep),
+    transition: s.transition && { ...s.transition },
+    cue: s.cue && { ...s.cue },
+    lyrics: copyRecord(s.lyrics),
+    receipts: { ...s.receipts },
+    pending: { ...s.pending },
+    settings: { ...s.settings },
+    spokenPairs: [...s.spokenPairs]
+  };
 }
 
-function cloneValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(cloneValue);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) out[key] = cloneValue(entry);
-    return out;
-  }
-  return value;
+function copyRecord<T extends object>(record: Record<string, T>): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [key, entry] of Object.entries(record)) out[key] = { ...entry };
+  return out;
 }
+
+/** Objects whose whole subtree is already frozen; shared payloads are not walked again. */
+const frozenTrees = new WeakSet<object>();
 
 export function deepFreeze<T>(value: T): DeepReadonly<T> {
-  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-    for (const entry of Object.values(value)) deepFreeze(entry);
+  if (value !== null && typeof value === "object" && !frozenTrees.has(value)) {
+    frozenTrees.add(value);
     Object.freeze(value);
+    for (const entry of Object.values(value)) deepFreeze(entry);
   }
   return value as DeepReadonly<T>;
 }

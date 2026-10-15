@@ -44,7 +44,16 @@ export interface DeckSnapshot {
   readonly gain: number;
 }
 
-export type CueStatus = "requested" | "ready" | "speaking" | "paused" | "ended" | "cancelled" | "failed";
+/**
+ * Narration status; requests and media facts are kept apart.
+ *  requested: asset being generated
+ *  ready:     voice loaded, not asked to play
+ *  starting:  voice.play issued, `playing` not confirmed yet (may be rejected)
+ *  speaking:  the voice element confirmed `playing`
+ *  waiting:   buffering after it was speaking
+ *  paused:    held by a transport pause; resume asks it to play again
+ */
+export type CueStatus = "requested" | "ready" | "starting" | "speaking" | "waiting" | "paused" | "ended" | "cancelled" | "failed";
 
 export interface VoiceSnapshot {
   readonly cueId: CueId;
@@ -66,7 +75,8 @@ export type LyricsView =
 
 /**
  * What subtitles should follow right now. Music lyrics follow the program
- * deck clock and revision; DJ subtitles follow the voice clock and cue.
+ * deck clock and revision; DJ subtitles follow the voice clock and cue, and
+ * only once the voice element confirmed `playing` (a requested play is not speech).
  */
 export type DisplayItem =
   | { readonly kind: "none" }

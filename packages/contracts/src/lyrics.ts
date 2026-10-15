@@ -37,7 +37,20 @@ export type LyricsAvailability =
   /** Lyrics exist but cannot be proven to match this recording. */
   | { readonly status: "unmatched" };
 
-const lyricWordDecoder = object<LyricWord>({
+/**
+ * True unless the result carries an asset bound to another recording or
+ * revision than the one requested. A same-revision asset of a different
+ * recording is still a mismatch: the revision alone is not the identity.
+ */
+export function lyricsResultMatches(
+  result: LyricsAvailability,
+  expected: { readonly recordingId: RecordingId; readonly sourceRevision: SourceRevision }
+): boolean {
+  if (result.status !== "available") return true;
+  return result.asset.recordingId === expected.recordingId && result.asset.sourceRevision === expected.sourceRevision;
+}
+
+const lyricWordDecoder =object<LyricWord>({
   startMs: number({ min: 0 }),
   endMs: number({ min: 0 }),
   text: string({ max: 200 })

@@ -1,7 +1,7 @@
 import { DECK_IDS, type OperationId, type PlaybackCommand, type QueueItem, type QueueItemId, type QueueEntryRequest } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { cancelCue, pauseCue, playCue, resumeCue } from "./cue.js";
-import { holdDeck, pauseDeck, setGain, unloadDeck } from "./decks.js";
+import { cancelCue, resumeCue } from "./cue.js";
+import { holdDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { dropPrep } from "./prep.js";
 import {
@@ -11,6 +11,7 @@ import {
   departureOutcome,
   loadProgramIfResolved,
   maybeCompleteOverlap,
+  pauseTransport,
   planAhead,
   releaseDuck,
   retireProgram
@@ -125,13 +126,8 @@ function next(ctx: StepContext): void {
 function pause(ctx: StepContext): void {
   const { s } = ctx;
   if (s.intent !== "play") return ctx.note("ignored", "not playing");
-  s.intent = "pause";
   s.blocked = false;
-  for (const id of DECK_IDS) {
-    const deck = s.decks[id];
-    if (deck.loadId !== null && (deck.wantPlaying || deck.status === "playing" || deck.status === "waiting")) pauseDeck(ctx, deck);
-  }
-  pauseCue(ctx);
+  pauseTransport(ctx);
 }
 
 function resume(ctx: StepContext): void {
@@ -153,9 +149,7 @@ function resume(ctx: StepContext): void {
     // Old gain automation was cancelled by pause; re-anchor to the current target.
     setGain(ctx, deck, deck.gain, s.config.resumeRampMs);
   }
-  const cue = s.cue;
-  if (cue?.status === "paused") resumeCue(ctx);
-  else if (cue?.status === "speaking") playCue(ctx);
+  resumeCue(ctx);
   loadProgramIfResolved(ctx);
 }
 

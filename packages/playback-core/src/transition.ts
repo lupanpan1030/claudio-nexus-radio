@@ -7,7 +7,7 @@ import {
   type TransitionMode
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { cancelCue, isCuePlayable, playCue, requestCue } from "./cue.js";
+import { cancelCue, isCuePlayable, requestCue, startCue } from "./cue.js";
 import { deckHoldingItem, deckPosition, deckWithRole, holdDeck, playDeck, setGain, unloadDeck } from "./decks.js";
 import { pairKey, type TransitionState } from "./state.js";
 
@@ -158,7 +158,5 @@ export function startTalking(ctx: StepContext, transition: TransitionState): voi
     ctx.note("decision", `${transition.mode} window missed; talking sequentially`);
     transition.mode = "sequential-talk";
   }
-  const cue = ctx.s.cue;
-  if (cue) cue.status = "speaking";
-  playCue(ctx);
+  startCue(ctx);
 }

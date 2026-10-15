@@ -7,7 +7,9 @@ import {
   isNewerPreparation,
   isNewerProjection,
   legacySegueHint,
-  lyricsMatchRevision,
+  lyricsMatchRecording,
+  preferDuration,
+  type DurationInfo,
   PROTOCOL_VERSION,
   preparedItemV1Decoder,
   prepareRequestV1Decoder,
@@ -118,18 +120,39 @@ test("prepare request decodes both explicit tracks and radio candidates", () => 
   assert.ok(!decode(prepareRequestV1Decoder, { ...base, target: { kind: "surprise" } }).ok);
 });
 
-test("lyrics are only accepted for the requested revision", () => {
+test("lyrics are only accepted for the requested recording and revision", () => {
+  const request = { recordingId: asId<never>("rec-1"), sourceRevision: asId<never>("rev-1") };
+  const asset = { assetId: asId<never>("l"), recordingId: asId<never>("rec-1"), sourceRevision: asId<never>("rev-1"), timing: "native-line" as const, offsetMs: 0, lines: [] };
   const response: LyricsResponseV1 = {
     protocolVersion: PROTOCOL_VERSION,
     itemId: asId("item-1"),
     sourceRevision: asId("rev-1"),
-    result: {
-      status: "available",
-      asset: { assetId: asId("l"), recordingId: asId("rec-1"), sourceRevision: asId("rev-2"), timing: "native-line", offsetMs: 0, lines: [] }
-    }
+    result: { status: "available", asset }
   };
-  assert.equal(lyricsMatchRevision(response, asId("rev-1")), false, "asset revision disagrees with envelope");
-  assert.equal(lyricsMatchRevision({ ...response, result: { status: "missing", reason: "not-found" } }, asId("rev-1")), true);
+  assert.equal(lyricsMatchRecording(response, request), true);
+  assert.equal(lyricsMatchRecording({ ...response, result: { status: "available", asset: { ...asset, sourceRevision: asId("rev-2") } } }, request), false, "asset revision disagrees with the request");
+  assert.equal(lyricsMatchRecording({ ...response, result: { status: "available", asset: { ...asset, recordingId: asId("rec-other") } } }, request), false, "same revision, different recording");
+  assert.equal(lyricsMatchRecording({ ...response, sourceRevision: asId("rev-2") }, request), false, "envelope answers another revision");
+  assert.equal(lyricsMatchRecording({ ...response, result: { status: "missing", reason: "not-found" } }, request), true);
+});
+
+test("duration precedence: measured element/decoded values beat provider metadata; unknown or weaker never overwrite", () => {
+  const provider: DurationInfo = { kind: "known", ms: 120_000, source: "provider-metadata" };
+  const container: DurationInfo = { kind: "known", ms: 190_000, source: "container-metadata" };
+  const decoded: DurationInfo = { kind: "known", ms: 199_000, source: "decoded" };
+  const element: DurationInfo = { kind: "known", ms: 200_000, source: "media-element" };
+  const unknown: DurationInfo = { kind: "unknown" };
+  assert.equal(preferDuration(unknown, provider), provider);
+  assert.equal(preferDuration(provider, unknown), provider);
+  assert.equal(preferDuration(provider, container), container);
+  assert.equal(preferDuration(container, decoded), decoded);
+  assert.equal(preferDuration(provider, element), element);
+  assert.equal(preferDuration(decoded, element), element);
+  assert.equal(preferDuration(element, provider), element, "provider metadata never overrides the element");
+  assert.equal(preferDuration(element, decoded), element);
+  assert.equal(preferDuration(element, unknown), element);
+  const changed: DurationInfo = { kind: "known", ms: 210_000, source: "media-element" };
+  assert.equal(preferDuration(element, changed), changed, "a later durationchange from the element updates it");
 });
 
 test("voice length uses measured duration and rate, or stays unknown", () => {

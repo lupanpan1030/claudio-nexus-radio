@@ -17,7 +17,9 @@ export interface StepResult {
 
 /**
  * The only transition function: (state, input, env) → (state, effects).
- * Pure apart from the injected id factory; never mutates `state`.
+ * Pure apart from the injected id factory; never mutates `state`. The
+ * returned state is frozen and shares unchanged payloads with the input, so
+ * `state` must itself come from createInitialState/step.
  */
 export function step(state: PlaybackState, input: CoreInput, env: CoreEnv): StepResult {
   const ctx = new StepContext(cloneState(state), env);

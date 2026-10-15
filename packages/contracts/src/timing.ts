@@ -48,6 +48,26 @@ export const durationInfoDecoder: Decoder<DurationInfo> = tagged<DurationInfo, "
   unknown: object<Extract<DurationInfo, { kind: "unknown" }>>({ kind: literal("unknown") })
 });
 
+const DURATION_SOURCE_RANK: Readonly<Record<DurationSource, number>> = Object.freeze({
+  "provider-metadata": 0,
+  "container-metadata": 1,
+  decoded: 2,
+  "media-element": 3
+});
+
+/**
+ * Duration a media timeline uses after a new observation. Sources, weakest
+ * first: provider-metadata < container-metadata < decoded < media-element
+ * (the element's own timeline, which positions and `ended` refer to). An
+ * observation from the same or a stronger source replaces the current value,
+ * so a later `durationchange` updates it; unknown or weaker never replaces a known value.
+ */
+export function preferDuration(current: DurationInfo, observed: DurationInfo): DurationInfo {
+  if (observed.kind === "unknown") return current;
+  if (current.kind === "unknown") return observed;
+  return DURATION_SOURCE_RANK[observed.source] >= DURATION_SOURCE_RANK[current.source] ? observed : current;
+}
+
 export function knownDurationMs(duration: DurationInfo): number | null {
   return duration.kind === "known" ? duration.ms : null;
 }

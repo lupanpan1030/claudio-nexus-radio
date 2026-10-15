@@ -33,7 +33,7 @@ export interface ResolvedMedia {
   readonly stream: {
     readonly handle: StreamHandle;
     /**
-     * Runtime-clock deadline (epoch-aligned ms, see playback/clock.ts) after which
+     * Runtime-clock deadline (epoch-aligned ms, see RuntimeClockMs in playback/snapshot.ts) after which
      * the handle must not start a new load. Wire DTOs carry ISO strings instead.
      */
     readonly expiresAt: number | null;

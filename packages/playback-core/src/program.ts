@@ -1,7 +1,7 @@
 import { asId, type ErrorInfo, type HistoryOutcome, type IdempotencyKey, type QueueItemId } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { finishCue, isCuePlayable, playCue } from "./cue.js";
-import { deckById, deckHoldingItem, deckWithRole, idleDeck, loadDeck, playDeck, setGain, unloadDeck } from "./decks.js";
+import { finishCue, isCuePlayable, pauseCue, startCue } from "./cue.js";
+import { deckById, deckHoldingItem, deckWithRole, idleDeck, loadDeck, pauseDeck, playDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics, requestLyrics } from "./lyrics.js";
 import { dropPrep, ensureResolved } from "./prep.js";
 import { findEntry, nextEntry, pushHistory, removeEntry } from "./queue.js";
@@ -253,10 +253,7 @@ export function commitOverlap(ctx: StepContext): void {
   const speaking = s.settings.djEnabled && isCuePlayable(s.cue);
   activateProgram(ctx, target, { gain: speaking ? s.config.underVoiceGain : 1, rampMs: s.config.fadeMs });
   if (deckA && deckA.role === "outgoing") setGain(ctx, deckA, speaking ? s.config.duckGain : 0, s.config.fadeMs);
-  if (speaking && s.cue) {
-    s.cue.status = "speaking";
-    playCue(ctx);
-  }
+  if (speaking) startCue(ctx);
   maybeCompleteOverlap(ctx);
 }
 
@@ -293,6 +290,19 @@ export function maybeCompleteOverlap(ctx: StepContext): void {
   transition.phase = "completed";
   s.transition = null;
   planAhead(ctx);
+}
+
+/**
+ * Transport pause: every deck that should sound and the voice are told to
+ * pause (idempotent for the element that already did); resume restarts them.
+ */
+export function pauseTransport(ctx: StepContext): void {
+  const { s } = ctx;
+  s.intent = "pause";
+  for (const deck of Object.values(s.decks)) {
+    if (deck.loadId !== null && (deck.wantPlaying || deck.status === "playing" || deck.status === "waiting")) pauseDeck(ctx, deck);
+  }
+  pauseCue(ctx);
 }
 
 /** Program item cannot play: record terminal failure and auto-advance (bounded). */

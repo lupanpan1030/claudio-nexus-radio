@@ -1,5 +1,7 @@
 import {
   isSameSource,
+  lyricsResultMatches,
+  preferDuration,
   raiseReadiness,
   sameTrack,
   type DeckId,
@@ -11,7 +13,7 @@ import {
   type ResolvedMedia
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { isVoiceExpired, markCueReady } from "./cue.js";
+import { isVoiceActive, isVoiceExpired, markCueReady, pauseCue, voiceRate } from "./cue.js";
 import { deckPosition, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { refreshSource } from "./prep.js";
@@ -24,6 +26,7 @@ import {
   maybeCompleteOverlap,
   onCueFinished,
   onProgramEnded,
+  pauseTransport,
   planAhead
 } from "./program.js";
 import { findEntry } from "./queue.js";
@@ -77,8 +80,8 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
   switch (event.kind) {
     case "metadata":
       deck.readiness = raiseReadiness(deck.readiness, "metadata");
-      // A measured duration replaces an unknown one; a known one is not overwritten by guesses.
-      if (deck.duration.kind === "unknown" && event.duration.kind === "known") deck.duration = event.duration;
+      // The element's own measurement outranks provider metadata; unknown/weaker never overwrite it.
+      deck.duration = preferDuration(deck.duration, event.duration);
       maybeStartCrossfade(ctx);
       return "applied";
     case "can-play":
@@ -97,7 +100,7 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
       // Stalled may still have buffered data; not a pause.
       return "applied";
     case "paused":
-      return onDeckPaused(ctx, deck, event.positionMs);
+      return onDeckPaused(ctx, deck, event.positionMs, event.atEnd);
     case "seeked":
       deck.clock = { positionMs: event.positionMs, observedAt: at, rate: deck.status === "playing" ? (deck.clock?.rate || 1) : 0 };
       return "applied";
@@ -116,6 +119,12 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
 
 function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): FactResult {
   const { s } = ctx;
+  if (deck.status === "ended" && deck.loadId !== null) {
+    // Only a seek or a new load revives an ended deck; a stray `playing` (late
+    // event, media key on the finished element) is silenced, not made program output.
+    ctx.emit({ type: "deck.pause", deck: deck.id, loadId: deck.loadId });
+    return duplicate(ctx, `deck ${deck.id} playing after ended`);
+  }
   deck.status = "playing";
   deck.readiness = raiseReadiness(deck.readiness, "can-play");
   deck.clock = { positionMs, observedAt: ctx.now, rate: 1 };
@@ -140,9 +149,14 @@ function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): F
   return "applied";
 }
 
-function onDeckPaused(ctx: StepContext, deck: DeckState, positionMs: number): FactResult {
+function onDeckPaused(ctx: StepContext, deck: DeckState, positionMs: number, atEnd: boolean): FactResult {
   const { s } = ctx;
   if (deck.status === "ended") return duplicate(ctx, "paused after ended");
+  if (atEnd) {
+    // Natural end: the element pauses right before `ended`. Not an interruption; `ended` decides.
+    deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
+    return "applied";
+  }
   const wasPlaying = deck.status === "playing" || deck.status === "waiting";
   deck.status = "paused";
   deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
@@ -150,17 +164,7 @@ function onDeckPaused(ctx: StepContext, deck: DeckState, positionMs: number): Fa
   // so the voice stops with the music.
   if (wasPlaying && deck.role === "program" && s.intent === "play" && deck.wantPlaying) {
     ctx.note("decision", "external pause of program deck; pausing transport");
-    s.intent = "pause";
-    for (const other of Object.values(s.decks)) {
-      if (other !== deck && other.loadId !== null && other.status === "playing") {
-        ctx.emit({ type: "deck.pause", deck: other.id, loadId: other.loadId });
-      }
-    }
-    const cue = s.cue;
-    if (cue?.status === "speaking" && cue.voiceLoadId) {
-      cue.status = "paused";
-      ctx.emit({ type: "voice.pause", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId });
-    }
+    pauseTransport(ctx);
   }
   return "applied";
 }
@@ -184,11 +188,7 @@ function onDeckRejected(ctx: StepContext, deck: DeckState, reason: string): Fact
     // Needs a user gesture; nothing pretends to be playing.
     s.blocked = true;
     s.intent = "pause";
-    const cue = s.cue;
-    if (cue?.status === "speaking" && cue.voiceLoadId) {
-      cue.status = "paused";
-      ctx.emit({ type: "voice.pause", cueId: cue.binding.cueId, voiceLoadId: cue.voiceLoadId });
-    }
+    pauseCue(ctx);
     ctx.note("decision", `program play rejected (${reason})`);
     return "applied";
   }
@@ -393,6 +393,7 @@ function onVoiceMedia(ctx: StepContext, fact: Extract<PlaybackFact, { type: "voi
     return stale(ctx, "voice event for an old cue/load");
   }
   const event = fact.event;
+  const at = ctx.now;
   switch (event.kind) {
     case "metadata":
       cue.readiness = raiseReadiness(cue.readiness, "metadata");
@@ -402,26 +403,39 @@ function onVoiceMedia(ctx: StepContext, fact: Extract<PlaybackFact, { type: "voi
       maybeStartCrossfade(ctx);
       return "applied";
     case "playing":
-      if (cue.status !== "speaking") {
-        // Voice started without (or against) an instruction: silence it.
+      if (!isVoiceActive(cue)) {
+        // Not asked to play, or paused before its play() took effect: silence it.
         ctx.emit({ type: "voice.pause", cueId: cue.binding.cueId, voiceLoadId: fact.voiceLoadId });
         return "applied";
       }
+      cue.status = "speaking";
       cue.everSpoke = true;
-      cue.clock = { positionMs: event.positionMs, observedAt: ctx.now, rate: 1 };
+      cue.clock = { positionMs: event.positionMs, observedAt: at, rate: voiceRate(cue) };
       return "applied";
     case "time":
-      cue.clock = { positionMs: event.positionMs, observedAt: ctx.now, rate: cue.status === "speaking" ? event.rate : 0 };
+      cue.clock = { positionMs: event.positionMs, observedAt: at, rate: cue.status === "speaking" ? event.rate : 0 };
+      return "applied";
+    case "waiting":
+      // Buffering before the first `playing` stays `starting`: nothing is audible yet.
+      if (cue.status === "speaking") cue.status = "waiting";
+      cue.clock = { positionMs: event.positionMs, observedAt: at, rate: 0 };
+      return "applied";
+    case "seeked":
+      cue.clock = { positionMs: event.positionMs, observedAt: at, rate: cue.status === "speaking" ? voiceRate(cue) : 0 };
       return "applied";
     case "paused":
-    case "waiting":
-    case "seeked":
-      cue.clock = { positionMs: event.positionMs, observedAt: ctx.now, rate: 0 };
+      cue.clock = { positionMs: event.positionMs, observedAt: at, rate: 0 };
+      // Natural end pauses before `ended`; an interruption of a voice that should
+      // sound pauses the whole transport, like the program deck.
+      if (!event.atEnd && isVoiceActive(cue) && s.intent === "play") {
+        ctx.note("decision", "external pause of the voice; pausing transport");
+        pauseTransport(ctx);
+      }
       return "applied";
     case "stalled":
       return "applied";
     case "ended":
-      if (cue.status !== "speaking" && cue.status !== "paused") return duplicate(ctx, "voice ended while not speaking");
+      if (!isVoiceActive(cue) && cue.status !== "paused") return duplicate(ctx, "voice ended while not speaking");
       onCueFinished(ctx, "ended");
       return "applied";
     case "play-rejected":
@@ -445,10 +459,10 @@ function onLyrics(ctx: StepContext, fact: Extract<PlaybackFact, { type: "lyrics.
     return "applied";
   }
   const result = fact.result;
-  if (fact.sourceRevision !== entry.sourceRevision || (result.status === "available" && result.asset.sourceRevision !== entry.sourceRevision)) {
-    // Lyrics for another recording are never shown, even if titles match.
+  if (fact.sourceRevision !== entry.sourceRevision || !lyricsResultMatches(result, entry)) {
+    // Lyrics for another recording are never shown, even under the same revision or title.
     entry.view = { status: "unmatched" };
-    ctx.note("decision", "lyrics revision mismatch");
+    ctx.note("decision", "lyrics recording/revision mismatch");
     return "applied";
   }
   if (result.status === "available") entry.view = { status: "available", asset: result.asset };

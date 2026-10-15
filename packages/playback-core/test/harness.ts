@@ -167,6 +167,17 @@ export class Sim {
     return this.fact({ type: "voice.media", cueId: load.cueId, voiceLoadId: load.voiceLoadId, event });
   }
 
+  /** What a browser reports at a natural end (measured in Chromium): `pause` with element.ended=true, then `ended`. */
+  naturalEnd(itemId: QueueItemId, positionMs = 200_000): StepResult {
+    this.deck(itemId, { kind: "paused", positionMs, atEnd: true });
+    return this.deck(itemId, { kind: "ended" });
+  }
+
+  voiceNaturalEnd(positionMs = 4000): StepResult {
+    this.voice({ kind: "paused", positionMs, atEnd: true });
+    return this.voice({ kind: "ended" });
+  }
+
   receipts(): EffectOf<"receipt.report">[] {
     return this.effects("receipt.report");
   }

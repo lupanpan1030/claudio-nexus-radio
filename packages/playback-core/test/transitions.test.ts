@@ -23,7 +23,10 @@ test("sequential talk: A ends → voice speaks → B starts; subtitles follow vo
   sim.deck(a, { kind: "ended" });
   assert.equal(sim.snap.transition?.phase, "talking");
   assert.equal(sim.lastEffect("voice.play").voiceLoadId, voiceLoad.voiceLoadId);
+  assert.equal(sim.snap.voice?.status, "starting", "asked to play, not yet speaking");
+  assert.notEqual(sim.snap.display.kind, "voice", "subtitles wait for the voice to really play");
   sim.voice({ kind: "playing", positionMs: 0 });
+  assert.equal(sim.snap.voice?.status, "speaking");
   assert.equal(sim.snap.display.kind, "voice");
   assert.equal(sim.snap.transport, "playing");
   assert.equal(sim.snap.program?.item.itemId, a, "B is not program while the DJ talks");

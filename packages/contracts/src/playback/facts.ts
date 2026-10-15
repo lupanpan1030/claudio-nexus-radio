@@ -16,13 +16,23 @@ export type PlayRejection = "not-allowed" | "aborted" | "unsupported" | "unknown
  * not "playing"; only a `playing` event (with position) is.
  */
 export type MediaEvent =
+  /**
+   * Duration as the element (or a decoder) measured it; sent again on every
+   * `durationchange`. The core keeps the strongest source (see preferDuration).
+   */
   | { readonly kind: "metadata"; readonly duration: DurationInfo }
   | { readonly kind: "can-play"; readonly through: boolean }
   | { readonly kind: "playing"; readonly positionMs: number }
   | { readonly kind: "waiting"; readonly positionMs: number }
   /** Network stalled; the element may still have buffered data. Not a pause. */
   | { readonly kind: "stalled" }
-  | { readonly kind: "paused"; readonly positionMs: number }
+  /**
+   * `atEnd` is `element.ended` read synchronously in the `pause` handler.
+   * Browsers pause at the natural end before firing `ended`, so atEnd=true is
+   * the end arriving, not an interruption. Never inferred from position vs duration:
+   * a real pause just before the end must still count as a pause.
+   */
+  | { readonly kind: "paused"; readonly positionMs: number; readonly atEnd: boolean }
   | { readonly kind: "seeked"; readonly positionMs: number }
   | { readonly kind: "time"; readonly positionMs: number; readonly rate: number }
   | { readonly kind: "ended" }
