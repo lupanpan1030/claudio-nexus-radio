@@ -23,7 +23,7 @@ Claudio 把两件事分开处理：本地系统负责选歌、队列和播放可
 - 根据偏好、近期播放与时间调整选歌节奏，并保留天气、日历等环境信息作为可选上下文。
 - 由大模型 API 从正向范式库中选择与当前歌曲匹配的参考片段，再创作 DJ 台词；范式可按自己的审美在 `prompts/dj-fewshot.md` 中编写或替换。
 - 使用 Fish Audio 合成语音；准备失败或错过窗口时继续音乐，不在歌曲中途补播过期口播。
-- 歌曲歌词与 DJ 字幕分别跟随音乐和语音时钟；没有原生逐字时间时显示逐行或纯文本。
+- 歌曲歌词与 DJ 字幕分别跟随音乐和语音时钟。DJ 没有原生时间时，只有在已知语音时长和多句边界的情况下才显示标注“估算”的句级字幕；其余显示纯文本，不模拟逐字时间。
 - 可选接入固定版本的 Folia 歌词舞台；舞台失败时回退基本歌词，播放由独立执行器负责。
 - 支持 Web Locks 的浏览器在同一来源下保持一个音频执行页，其余页面观察；刷新后恢复停止态队列。
 
@@ -148,9 +148,10 @@ curl http://localhost:3080/api/v1/protocol
 node scripts/test.mjs
 npm run typecheck:packages
 npm run build
+node scripts/app-e2e/run.mjs --out /tmp/claudio-app-check
 ```
 
-统一测试入口使用临时数据目录，分别运行包、服务端和UI测试并报告跳过项。KuGou上游兼容测试需要固定源码checkout：设置 `CLAUDIO_KUGOU_API_REVIEWED_DIR` 后可加 `--require-upstream`，缺失时不能把跳过说成已验证。浏览器执行器验证入口为 `npm run test:browser`，需可用的Chromium；具体运行证据与能力限制见统一实施方案。
+统一测试入口使用临时数据目录，分别运行包、服务端和UI测试并报告跳过项。KuGou上游兼容测试需要固定源码checkout：设置 `CLAUDIO_KUGOU_API_REVIEWED_DIR` 后可加 `--require-upstream`，缺失时不能把跳过说成已验证。浏览器执行器验证入口为 `npm run test:browser`；主页面验收使用 `scripts/app-e2e/run.mjs`，覆盖真实页面、播放执行器与隔离服务端。两者均需可用的Chromium；主页面工具的环境配置、场景及证据范围见 [验收工具说明](scripts/app-e2e/README.md)，实际结果以统一实施方案为准。
 
 `npm run smoke` 已通过隔离包装器运行旧模块检查：临时工作目录、空凭据、只允许回环网络，默认清理生成的数据；它不是新核心的完整验收。DJ质量脚本仍依赖配置的曲库与外部服务。常规回归使用上述统一测试入口；生产构建后可执行 `npm run verify:artifact` 检查脱离源码的模块导入。CI固定Node和KuGou上游版本，要求上游兼容测试实际运行。开发命令直接解析workspace源码，无需先build。
 
