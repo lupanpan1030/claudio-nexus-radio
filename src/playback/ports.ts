@@ -24,8 +24,8 @@ import { fillPath, type ProtocolPaths } from "./protocol";
 /**
  * Narration for one cue: POST starts (idempotent per cueId on the server),
  * repeated POSTs long-poll newer versions until script and voice settle.
- * Cancelling sends a best-effort DELETE for the cue when the server announced
- * that path; the core has already dropped the cue either way.
+ * Cancelling sends a best-effort DELETE for the cue; the core has already
+ * dropped the cue either way.
  */
 export class HttpCuePort implements CuePort {
   constructor(
@@ -46,7 +46,7 @@ export class HttpCuePort implements CuePort {
       to: { itemId: binding.toItemId, track: request.to, sourceRevision: binding.toRevision }
     };
     const onAbort = () => {
-      if (this.paths.narrationCue) void bestEffort(this.fetchFn, "DELETE", fillPath(this.paths.narrationCue, "cueId", binding.cueId), this.timings.cancelTimeoutMs);
+      void bestEffort(this.fetchFn, "DELETE", fillPath(this.paths.narrationCue, "cueId", binding.cueId), this.timings.cancelTimeoutMs);
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -117,10 +117,10 @@ export class HttpReceiptPort implements ReceiptPort {
  * so a handle can never point the media element somewhere unexpected.
  */
 export function createStreamUrls(paths: ProtocolPaths, origin: string): StreamUrlPort {
-  const prefix = paths.streams ? paths.streams.slice(0, paths.streams.indexOf(":token")) : null;
+  const prefix = paths.streams.slice(0, paths.streams.indexOf(":token"));
   const toSpec = (handle: StreamHandle): MediaSourceSpec => {
     const value = String(handle);
-    if (prefix && value.startsWith(prefix) && !value.startsWith("//")) return { url: new URL(value, origin).href, crossOrigin: null };
+    if (prefix.startsWith("/api/") && value.startsWith(prefix) && !value.startsWith("//")) return { url: new URL(value, origin).href, crossOrigin: null };
     throw portError("invalid", "unsupported_stream_handle");
   };
   return { music: toSpec, voice: toSpec };

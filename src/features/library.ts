@@ -25,9 +25,9 @@ export function useLibrary(): LibraryState {
     const controller = new AbortController();
     inFlight.current = controller;
     try {
-      const rows = await getLibraryRows(controller.signal);
+      const { rows, total } = await getLibraryRows(controller.signal);
       if (controller.signal.aborted) return;
-      setCatalog(CatalogIndex.fromLibraryRows(rows));
+      setCatalog(CatalogIndex.fromLibraryRows(rows, total));
       setTrackCount(rows.length);
       setError(null);
     } catch (caught) {

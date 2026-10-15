@@ -104,12 +104,19 @@ test("stream handles are only accepted under the announced same-origin streams r
   assert.throws(() => urls.voice(asId("//evil.example/api/v1/playback/streams/x")), PortError);
 });
 
-test("handshake: v1 accepted with extra paths; legacy mode or other versions refuse to start", () => {
-  const ready = interpretHandshake(200, { protocolVersion: 1, playbackProtocol: "v1", serverInstanceId: "s1", paths: { ...TEST_PATHS } });
+test("handshake: only a 2xx shared-contract v1 answer starts a player; non-2xx bodies never pass", async () => {
+  const { API_V1_EXTRA_PATHS, API_V1_PATHS } = await import("@claudio/contracts");
+  // What the server's protocol route sends (server/http/v1-routes.ts).
+  const handshake = { protocolVersion: 1, playbackProtocol: "v1", serverInstanceId: "s1", paths: { ...API_V1_PATHS, ...API_V1_EXTRA_PATHS }, providers: [{ providerId: "local", lyrics: true }] };
+  const ready = interpretHandshake(200, handshake);
   assert.equal(ready.status, "ready");
   assert.equal(ready.status === "ready" && ready.paths.narrationCue, "/api/v1/playback/narration/:cueId");
-  assert.equal(interpretHandshake(200, { protocolVersion: 1, playbackProtocol: "legacy", serverInstanceId: "s1", paths: {} }).status, "mismatch");
-  assert.equal(interpretHandshake(200, { protocolVersion: 2, playbackProtocol: "v1", serverInstanceId: "s1" }).status, "mismatch");
-  assert.equal(interpretHandshake(404, null).status, "mismatch");
+  assert.equal(interpretHandshake(503, handshake).status, "unreachable", "a valid body with a 5xx is not a handshake");
+  assert.equal(interpretHandshake(404, handshake).status, "mismatch");
+  assert.equal(interpretHandshake(200, { ...handshake, playbackProtocol: "legacy" }).status, "mismatch");
+  assert.equal(interpretHandshake(200, { ...handshake, protocolVersion: 2 }).status, "mismatch");
+  assert.equal(interpretHandshake(200, { ...handshake, providers: undefined }).status, "mismatch", "decoded with the shared decoder");
+  assert.equal(interpretHandshake(200, { ...handshake, paths: { ...handshake.paths, streams: "/api/v2/streams/:token" } }).status, "mismatch");
+  assert.equal(interpretHandshake(200, null).status, "mismatch");
   assert.equal(interpretHandshake(502, null).status, "unreachable");
 });

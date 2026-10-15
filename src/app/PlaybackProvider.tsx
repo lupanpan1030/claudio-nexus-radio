@@ -57,7 +57,10 @@ export function PlaybackProvider({ children }: { readonly children: ReactNode })
         storage,
         settings: readAppSettings,
         log: ring.log,
-        loadCatalog: async (signal) => CatalogIndex.fromLibraryRows(await getLibraryRows(signal))
+        loadCatalog: async (signal) => {
+          const { rows, total } = await getLibraryRows(signal);
+          return CatalogIndex.fromLibraryRows(rows, total);
+        }
       });
       setSession(created);
       if (import.meta.env.DEV) {
@@ -65,7 +68,9 @@ export function PlaybackProvider({ children }: { readonly children: ReactNode })
         (window as unknown as { __claudioPlayback?: unknown }).__claudioPlayback = Object.freeze({
           view: () => active.host.getView(),
           clock: () => active.host.clock.read(),
-          log: () => ring.entries()
+          log: () => ring.entries(),
+          // Same intent path as the progress slider, at ms precision (the slider steps whole seconds).
+          seek: (positionMs: number) => active.controller.seek(positionMs)
         });
       }
     }, 0);

@@ -8,8 +8,35 @@ export interface StageState {
   readonly phase: StagePhase;
   /** Why the stage is not used (shown in diagnostics, never blocks audio). */
   readonly reason: string | null;
-  /** True while the stage itself draws timed lyrics (Lattice); otherwise Claudio's basic lyrics show. */
+  /**
+   * True only while the stage really shows timed lyrics: Lattice mode, its
+   * WebGL renderer ready and no status overlay (not starting, not awaiting a
+   * clock). Otherwise Claudio's basic lyrics show.
+   */
   readonly drawing: boolean;
+}
+
+/** Readiness probe while the renderer starts: fixed cadence, bounded count, cancelled with the handle. */
+export interface StageProbePolicy {
+  readonly intervalMs: number;
+  readonly maxProbes: number;
+}
+
+export const DEFAULT_PROBE_POLICY: StageProbePolicy = Object.freeze({ intervalMs: 150, maxProbes: 60 });
+
+interface ProbeTimers {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const globalTimers: ProbeTimers = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+};
+
+/** The stage's own visibility rule for its canvas (renderer state and status both count). */
+export function stageDraws(diagnostics: { readonly renderer: string; readonly status: string | null; readonly mode: string }): boolean {
+  return diagnostics.mode === "lattice" && diagnostics.renderer === "ready" && diagnostics.status === null;
 }
 
 const OFF: StageState = Object.freeze({ phase: "off", reason: null, drawing: false });
@@ -20,6 +47,13 @@ const OFF: StageState = Object.freeze({ phase: "off", reason: null, drawing: fal
  * destroyed and a new one starts with a fresh, strictly increasing sequence.
  * A late lazy import is ignored once detached. Any failure ends in "fallback"
  * (Claudio's own lyrics) and never reaches playback.
+ *
+ * The stage reports failures but not success, and its renderer starts
+ * asynchronously. While it is starting the controller re-reads diagnostics on
+ * a short, bounded timer (not per frame), so `drawing` turns true when the
+ * canvas really appears even if no new input arrives (paused song, quiet
+ * observer). The probe stops once the renderer settles, after its budget, or
+ * when the handle goes away.
  */
 export class FoliaStageController {
   readonly state: StatusStore<StageState> = createStatusStore<StageState>(OFF);
@@ -31,10 +65,13 @@ export class FoliaStageController {
   private token = 0;
   private visible = true;
   private last: Omit<FoliaInputLike, "version"> | null = null;
+  private probe: { handle: unknown; left: number } | null = null;
 
   constructor(
     private readonly load: () => Promise<FoliaLoadResult>,
-    private readonly options: Pick<FoliaMountOptionsLike, "appearance" | "now">
+    private readonly options: Pick<FoliaMountOptionsLike, "appearance" | "now">,
+    private readonly probePolicy: StageProbePolicy = DEFAULT_PROBE_POLICY,
+    private readonly timers: ProbeTimers = globalTimers
   ) {}
 
   attach(host: HTMLElement): void {
@@ -109,18 +146,60 @@ export class FoliaStageController {
     this.refreshDrawing();
   }
 
+  /** Read-only diagnostics of the mounted stage (dev tooling); null without a handle. */
+  diagnostics(): unknown {
+    try {
+      return this.handle?.getDiagnostics() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private refreshDrawing(): void {
     const handle = this.handle;
     if (!handle) return;
     let drawing = false;
+    let starting = false;
     try {
       const diagnostics = handle.getDiagnostics();
-      drawing = diagnostics.mode === "lattice" && diagnostics.renderer !== "failed" && diagnostics.renderer !== "disabled";
+      drawing = stageDraws(diagnostics);
+      starting = diagnostics.mode === "lattice" && (diagnostics.renderer === "creating" || diagnostics.renderer === "idle");
     } catch {
       drawing = false;
     }
     const current = this.state.get();
     if (current.phase === "ready" && current.drawing !== drawing) this.state.set({ phase: "ready", reason: null, drawing });
+    if (starting) this.startProbe();
+    else this.stopProbe();
+  }
+
+  private startProbe(): void {
+    if (this.probe) return;
+    this.probe = { handle: null, left: this.probePolicy.maxProbes };
+    this.scheduleProbe();
+  }
+
+  private scheduleProbe(): void {
+    const probe = this.probe;
+    if (!probe) return;
+    if (probe.left <= 0) {
+      // Still starting after the budget: keep the basic lyrics; the next input re-checks.
+      this.probe = null;
+      return;
+    }
+    probe.left -= 1;
+    probe.handle = this.timers.setTimeout(() => {
+      if (this.probe !== probe) return;
+      probe.handle = null;
+      this.refreshDrawing();
+      if (this.probe === probe) this.scheduleProbe();
+    }, this.probePolicy.intervalMs);
+  }
+
+  private stopProbe(): void {
+    const probe = this.probe;
+    this.probe = null;
+    if (probe?.handle != null) this.timers.clearTimeout(probe.handle);
   }
 
   private fallback(reason: string): void {
@@ -129,6 +208,7 @@ export class FoliaStageController {
   }
 
   private destroyHandle(): void {
+    this.stopProbe();
     const handle = this.handle;
     this.handle = null;
     if (!handle) return;

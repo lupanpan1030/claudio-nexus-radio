@@ -1,25 +1,10 @@
-import { API_V1_PATHS, PROTOCOL_VERSION, isRecord } from "@claudio/contracts";
+import { API_V1_EXTRA_PATHS, API_V1_PATHS, decode, protocolHandshakeV1Decoder, type ProtocolHandshakeV1 } from "@claudio/contracts";
 import { isAbortError, type FetchLike } from "./http";
 
-/**
- * Endpoints this client uses. The shared contract fixes the core paths; the
- * extra ones (stream handles, cue cancel, history, catalog search, now stream)
- * are read from the server's handshake until the contract names them.
- */
-export interface ProtocolPaths {
-  readonly prepare: string;
-  readonly preparation: string;
-  readonly resolve: string;
-  readonly narration: string;
-  readonly lyrics: string;
-  readonly started: string;
-  readonly now: string;
-  /** e.g. "/api/v1/playback/streams/:token"; null when the server did not announce it. */
-  readonly streams: string | null;
-  readonly narrationCue: string | null;
-  readonly startedHistory: string | null;
-  readonly catalogSearch: string | null;
-}
+/** Every endpoint this client uses: exactly the shared contract's path tables. */
+export type ProtocolPaths = ProtocolHandshakeV1["paths"];
+
+export const SHARED_PATHS: ProtocolPaths = Object.freeze({ ...API_V1_PATHS, ...API_V1_EXTRA_PATHS });
 
 export type ProtocolCheck =
   | { readonly status: "ready"; readonly serverInstanceId: string; readonly paths: ProtocolPaths }
@@ -27,37 +12,30 @@ export type ProtocolCheck =
   | { readonly status: "mismatch"; readonly detail: string }
   | { readonly status: "unreachable"; readonly detail: string };
 
-export const PROTOCOL_PATH = "/api/v1/protocol";
+export const PROTOCOL_PATH = API_V1_EXTRA_PATHS.protocol;
 
-function pathOrNull(paths: Record<string, unknown>, key: string): string | null {
-  const value = paths[key];
-  return typeof value === "string" && value.startsWith("/api/") ? value : null;
-}
-
-/** Pure decision on a handshake body; separated so tests do not need a server. */
+/**
+ * Pure decision on a handshake answer; separated so tests do not need a
+ * server. Only a 2xx body that decodes as ProtocolHandshakeV1, runs the v1
+ * playback protocol and announces exactly the shared paths starts a player.
+ * A non-2xx answer never passes, whatever its body says.
+ */
 export function interpretHandshake(httpStatus: number, body: unknown): ProtocolCheck {
-  if (!isRecord(body)) return { status: httpStatus === 404 ? "mismatch" : "unreachable", detail: `HTTP ${httpStatus}` };
-  if (body.protocolVersion !== PROTOCOL_VERSION) return { status: "mismatch", detail: `server protocol ${String(body.protocolVersion)}` };
-  if (body.playbackProtocol !== "v1") return { status: "mismatch", detail: `server playback mode ${String(body.playbackProtocol)}` };
-  if (typeof body.serverInstanceId !== "string" || body.serverInstanceId.length === 0) return { status: "mismatch", detail: "missing serverInstanceId" };
-  const announced = isRecord(body.paths) ? body.paths : {};
-  const core = Object.fromEntries(
-    (Object.keys(API_V1_PATHS) as (keyof typeof API_V1_PATHS)[]).map((key) => [key, pathOrNull(announced, key) ?? API_V1_PATHS[key]])
-  ) as Record<keyof typeof API_V1_PATHS, string>;
-  for (const key of Object.keys(API_V1_PATHS) as (keyof typeof API_V1_PATHS)[]) {
-    if (core[key] !== API_V1_PATHS[key]) return { status: "mismatch", detail: `path ${key} differs from the shared contract` };
+  if (httpStatus < 200 || httpStatus >= 300) {
+    // No such route (an older server) is a version mismatch; anything else is the server being unwell.
+    return { status: httpStatus === 404 || httpStatus === 410 || httpStatus === 501 ? "mismatch" : "unreachable", detail: `HTTP ${httpStatus}` };
   }
-  return {
-    status: "ready",
-    serverInstanceId: body.serverInstanceId,
-    paths: {
-      ...core,
-      streams: pathOrNull(announced, "streams"),
-      narrationCue: pathOrNull(announced, "narrationCue"),
-      startedHistory: pathOrNull(announced, "startedHistory"),
-      catalogSearch: pathOrNull(announced, "catalogSearch")
-    }
-  };
+  const decoded = decode(protocolHandshakeV1Decoder, body);
+  if (!decoded.ok) {
+    const first = decoded.issues[0];
+    return { status: "mismatch", detail: first ? `handshake ${first.path}: ${first.message}` : "handshake does not match the contract" };
+  }
+  const handshake = decoded.value;
+  if (handshake.playbackProtocol !== "v1") return { status: "mismatch", detail: `server playback mode ${handshake.playbackProtocol}` };
+  for (const key of Object.keys(SHARED_PATHS) as (keyof ProtocolPaths)[]) {
+    if (handshake.paths[key] !== SHARED_PATHS[key]) return { status: "mismatch", detail: `path ${key} differs from the shared contract` };
+  }
+  return { status: "ready", serverInstanceId: handshake.serverInstanceId, paths: SHARED_PATHS };
 }
 
 export async function checkProtocol(fetchFn: FetchLike, signal: AbortSignal, timeoutMs = 8000): Promise<ProtocolCheck> {

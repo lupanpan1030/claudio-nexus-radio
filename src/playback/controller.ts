@@ -25,6 +25,9 @@ const PLAYING_INTENT = new Set(["requested", "loading", "playing", "waiting", "e
  */
 const INTENT_COMMANDS = new Set<PlaybackCommand["type"]>(["select", "next", "remove", "enqueue", "replace-queue", "stop"]);
 
+/** Explicit transport intents that must keep a pending radio start silent. */
+const TRANSPORT_STOPS = new Set<PlaybackCommand["type"]>(["pause", "stop"]);
+
 /** Transport states in which the main button means "pause". */
 export function wantsPlayback(snapshot: PlaybackSnapshot | null): boolean {
   return snapshot !== null && PLAYING_INTENT.has(snapshot.transport);
@@ -72,13 +75,13 @@ export class PreviousNavigator {
 /**
  * The one place user intents become playback commands. `userActionSeq`
  * advances only when the listener changes what is lined up (select, skip,
- * queue edits, stop, cancelling a radio start) — never on pause/resume,
- * seek, volume, voice or clock ticks — so late async answers (chat, radio
- * start) can tell whether they were overtaken.
+ * queue edits, stop, starting the radio) — never on pause/resume, seek,
+ * volume, voice or clock ticks — so late async answers (chat, radio start)
+ * can tell whether they were overtaken. A pending radio start's "play when
+ * chosen" is a separate, narrower mark: any pause/stop withdraws it.
  */
 export class PlaybackController {
   private readonly seqStore = createStatusStore(0);
-  private seeks = 0;
   private readonly previousNav = new PreviousNavigator();
 
   constructor(
@@ -98,19 +101,41 @@ export class PlaybackController {
     return this.previousNav.target(snapshot) !== null;
   }
 
+  /**
+   * Main button and Space: pause when playback is wanted (or a radio start is
+   * still going to play), otherwise play.
+   */
   togglePlay(): void {
     const snapshot = this.snapshot();
     if (!snapshot) return;
+    if (wantsPlayback(snapshot) || this.startWillPlay()) this.pause();
+    else this.play();
+  }
+
+  /**
+   * Idempotent "make it play" (Media Session play). Already playing or a radio
+   * start already on its way to playing: nothing changes.
+   */
+  play(): void {
+    const snapshot = this.snapshot();
+    if (!snapshot) return;
     this.host.unlockAudio();
-    if (wantsPlayback(snapshot)) return void this.user([{ type: "pause" }]);
+    if (wantsPlayback(snapshot) || this.startWillPlay()) return;
     if (snapshot.program || snapshot.queue.length > 0) return void this.user([{ type: "resume" }]);
-    const refill = this.owner()?.refill;
-    const starting = refill?.getStatus();
     this.bumpSeq();
-    // A second press while the first song is being chosen means "never mind":
-    // the advanced seq makes the candidate arrive silently instead of playing.
-    if (starting?.userInitiated && (starting.phase === "selecting" || starting.phase === "retry-wait")) return;
-    refill?.startFromEmpty();
+    this.owner()?.refill.startFromEmpty();
+  }
+
+  /**
+   * Idempotent "make it silent" (Media Session pause). Pauses playback and
+   * also withdraws the "play when chosen" of a radio start still selecting,
+   * so a late candidate is queued silently instead of starting sound.
+   */
+  pause(): void {
+    const snapshot = this.snapshot();
+    if (!snapshot) return;
+    if (wantsPlayback(snapshot)) return void this.user([{ type: "pause" }]);
+    this.owner()?.refill.cancelStartPlayback();
   }
 
   next(): void {
@@ -145,13 +170,7 @@ export class PlaybackController {
   /** Seeks the program music; never moves a DJ voice. */
   seek(positionMs: number): void {
     if (!Number.isFinite(positionMs) || positionMs < 0) return;
-    this.seeks += 1;
     this.host.dispatch({ type: "seek", positionMs });
-  }
-
-  /** Changes on every seek this page requested; lets the lyrics stage re-anchor exactly instead of smoothing. */
-  get seekEpoch(): number {
-    return this.seeks;
   }
 
   setVolume(value: number): void {
@@ -200,6 +219,10 @@ export class PlaybackController {
     this.user(commands);
   }
 
+  private startWillPlay(): boolean {
+    return this.owner()?.refill.getStatus().autoplay === true;
+  }
+
   private snapshot(): PlaybackSnapshot | null {
     const view = this.host.getView();
     return view.canControl ? view.snapshot : null;
@@ -212,6 +235,8 @@ export class PlaybackController {
   private user(commands: readonly PlaybackCommand[]): void {
     if (!this.host.getView().canControl) return;
     if (commands.some((command) => INTENT_COMMANDS.has(command.type))) this.bumpSeq();
+    // Pause/stop withdraw a pending radio start's autoplay without making chat answers stale.
+    if (commands.some((command) => TRANSPORT_STOPS.has(command.type))) this.owner()?.refill.cancelStartPlayback();
     for (const command of commands) this.host.dispatch(command);
   }
 }

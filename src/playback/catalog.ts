@@ -1,4 +1,5 @@
 import { decode, trackRefDecoder, type TrackDisplay, type TrackRef } from "@claudio/contracts";
+import type { LegacyLookupResult } from "./persistence";
 
 /** What the UI may know about one catalog track. `legacyId` is the old library row key the legacy APIs (taste) still use. */
 export interface CatalogEntry {
@@ -32,6 +33,18 @@ interface LibraryRow {
  * to a ref the server stated (DTO `ref`, chat pick `track`); a legacy song id
  * is never reinterpreted as a provider id or media id.
  */
+/** What the library said about rows it could not link, by legacy id. */
+export interface CatalogGaps {
+  /** Rows the server listed with `ref: null`: no provider serves them. */
+  readonly noProvider: ReadonlySet<string>;
+  /** Rows without a usable `ref` field (older server, malformed): mapping not stated. */
+  readonly unmapped: ReadonlySet<string>;
+  /** False when the list may be cut short (total larger than the rows returned, or unknown). */
+  readonly complete: boolean;
+}
+
+const NO_GAPS: CatalogGaps = Object.freeze({ noProvider: new Set<string>(), unmapped: new Set<string>(), complete: false });
+
 export class CatalogIndex {
   static readonly EMPTY = new CatalogIndex([], 0);
 
@@ -41,13 +54,17 @@ export class CatalogIndex {
   constructor(
     entries: readonly CatalogEntry[],
     /** Library rows that came without a ref (cannot be queued by this client). */
-    readonly unlinkedRows: number
+    readonly unlinkedRows: number,
+    readonly gaps: CatalogGaps = NO_GAPS
   ) {
     for (const entry of entries) this.put(entry);
   }
 
-  static fromLibraryRows(rows: readonly unknown[]): CatalogIndex {
+  /** `total` is the library's own count; rows beyond the page are unknown, not gone. */
+  static fromLibraryRows(rows: readonly unknown[], total: number | null = null): CatalogIndex {
     const entries: CatalogEntry[] = [];
+    const noProvider = new Set<string>();
+    const unmapped = new Set<string>();
     let unlinked = 0;
     for (const raw of rows) {
       if (typeof raw !== "object" || raw === null) continue;
@@ -55,6 +72,7 @@ export class CatalogIndex {
       const ref = decodeRef(row.ref);
       if (!ref || typeof row.id !== "string") {
         unlinked += 1;
+        if (typeof row.id === "string") (Object.prototype.hasOwnProperty.call(row, "ref") && row.ref === null ? noProvider : unmapped).add(row.id);
         continue;
       }
       entries.push({
@@ -68,7 +86,21 @@ export class CatalogIndex {
         }
       });
     }
-    return new CatalogIndex(entries, unlinked);
+    const complete = total !== null && Number.isSafeInteger(total) && total > 0 && rows.length >= total;
+    return new CatalogIndex(entries, unlinked, { noProvider, unmapped, complete });
+  }
+
+  /**
+   * Old queue song id → what the server stated about it. Absent from a
+   * complete, non-empty list = gone; absent from a partial or empty list =
+   * unmapped (ask again later), never guessed.
+   */
+  legacyLookup(songId: string): LegacyLookupResult {
+    const entry = this.byLegacy.get(songId);
+    if (entry) return { status: "found", entry: { track: entry.ref, display: entry.display } };
+    if (this.gaps.noProvider.has(songId)) return { status: "gone" };
+    if (this.gaps.unmapped.has(songId) || !this.gaps.complete) return { status: "unmapped" };
+    return { status: "gone" };
   }
 
   get size(): number {
@@ -87,7 +119,7 @@ export class CatalogIndex {
   withPairs(pairs: readonly { readonly legacyId: string; readonly ref: TrackRef }[]): CatalogIndex {
     const added = pairs.filter((pair) => !this.byLegacy.has(pair.legacyId));
     if (added.length === 0) return this;
-    const next = new CatalogIndex([...this.byRef.values()], this.unlinkedRows);
+    const next = new CatalogIndex([...this.byRef.values()], this.unlinkedRows, this.gaps);
     for (const pair of added) {
       const known = next.byRef.get(refKey(pair.ref));
       next.put({ ref: pair.ref, legacyId: pair.legacyId, playable: known?.playable ?? true, display: known?.display ?? { title: "", artist: "" } });

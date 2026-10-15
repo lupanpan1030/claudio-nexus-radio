@@ -32,20 +32,32 @@ export interface RefillStatus {
   readonly phase: RefillPhase;
   /** True while serving a listener's play click on an empty queue. */
   readonly userInitiated: boolean;
+  /**
+   * True while that listener start will still play its candidate on arrival.
+   * Any later pause/stop withdraws it (the candidate then only waits in the queue).
+   */
+  readonly autoplay: boolean;
   readonly attempts: number;
   readonly lastError: ErrorInfo | null;
 }
 
-const IDLE: RefillStatus = Object.freeze({ phase: "idle", userInitiated: false, attempts: 0, lastError: null });
+const IDLE: RefillStatus = Object.freeze({ phase: "idle", userInitiated: false, autoplay: false, attempts: 0, lastError: null });
 
 interface Context {
   readonly key: string;
   readonly afterItemId: QueueItemId | null;
 }
 
+/** One listener start from an empty queue; shared by its attempts and retries. */
+interface UserStart {
+  readonly seq: number;
+  /** Cleared by an explicit pause/stop; never set again for this start. */
+  autoplay: boolean;
+}
+
 interface InFlight {
   readonly key: string;
-  readonly user: { readonly seq: number } | null;
+  readonly user: UserStart | null;
   readonly controller: AbortController;
   readonly itemId: QueueItemId;
   preparationId: PreparationId | null;
@@ -92,7 +104,14 @@ export function refillContext(snapshot: PlaybackSnapshot): Context | null {
  * under that id (the PreparePort adopts the preparation instead of preparing
  * again). One request at a time; a bounded number of attempts per program;
  * a candidate that arrives after its context changed is cancelled, not queued.
- * Background refills never start playback.
+ *
+ * A background refill never sends resume itself. Its enqueue still continues
+ * playback when the queue had already run out while the listener wanted
+ * playback (`exhausted`): that is the core's rule for enqueue, and the reason
+ * a refill keeps running into exhaustion. After an explicit pause/stop the
+ * core is no longer exhausted, so nothing starts. Only a listener's start from
+ * an empty queue resumes, and only while its `autoplay` mark still stands.
+ * Attempt/stop bookkeeping is kept for the current context only.
  */
 export class RadioRefill {
   private readonly store: StatusStore<RefillStatus> = createStatusStore(IDLE);
@@ -101,7 +120,8 @@ export class RadioRefill {
   private readonly log: LogPort;
   private readonly clock: () => number;
   private inFlight: InFlight | null = null;
-  private retryTimer: { key: string; handle: unknown } | null = null;
+  private retryTimer: { key: string; handle: unknown; user: UserStart | null } | null = null;
+  /** Bookkeeping for at most the current background context and the current listener start. */
   private attempts = new Map<string, number>();
   private stopped = new Set<string>();
   private unsubscribe: (() => void) | null = null;
@@ -136,8 +156,24 @@ export class RadioRefill {
     const last = snapshot.history.at(-1)?.item.itemId ?? null;
     const seq = this.options.userActionSeq();
     const key = `user:${seq}`;
-    this.attempts.delete(key);
-    void this.run({ key, afterItemId: last }, { seq });
+    this.forgetExcept(null);
+    void this.run({ key, afterItemId: last }, { seq, autoplay: true });
+  }
+
+  /**
+   * The listener paused or stopped: a start still selecting will not play its
+   * candidate (it may still be queued silently) and is not retried.
+   */
+  cancelStartPlayback(): void {
+    const user = this.inFlight?.user ?? this.retryTimer?.user ?? null;
+    if (!user || !user.autoplay) return;
+    user.autoplay = false;
+    const current = this.store.get();
+    if (this.retryTimer?.user === user) {
+      this.clearRetry();
+      return this.publish(IDLE);
+    }
+    this.publish({ ...current, autoplay: false });
   }
 
   /** Manual retry after no-candidate/gave-up. */
@@ -169,17 +205,30 @@ export class RadioRefill {
       return;
     }
     if (this.inFlight || this.retryTimer) return;
+    // A new context: earlier contexts can never come back, so their counts go.
+    this.forgetExcept(context.key);
     if (this.stopped.has(context.key)) return;
     void this.run(context, null);
   }
 
-  private async run(context: Context, user: { seq: number } | null): Promise<void> {
+  /** Drops attempt/stop records of every context but `key` (personal radio sessions run for hours). */
+  private forgetExcept(key: string | null): void {
+    for (const known of [...this.attempts.keys()]) if (known !== key) this.attempts.delete(known);
+    for (const known of [...this.stopped]) if (known !== key) this.stopped.delete(known);
+  }
+
+  /** Bookkeeping size, for tests and diagnostics. */
+  get trackedContexts(): number {
+    return new Set([...this.attempts.keys(), ...this.stopped]).size;
+  }
+
+  private async run(context: Context, user: UserStart | null): Promise<void> {
     const itemId = asId<QueueItemId>(this.options.ids.reserve("item"));
     const flight: InFlight = { key: context.key, user, controller: new AbortController(), itemId, preparationId: null };
     this.inFlight = flight;
     const attempt = (this.attempts.get(context.key) ?? 0) + 1;
     this.attempts.set(context.key, attempt);
-    this.publish({ phase: "selecting", userInitiated: user !== null, attempts: attempt, lastError: null });
+    this.publish({ phase: "selecting", userInitiated: user !== null, autoplay: user?.autoplay === true, attempts: attempt, lastError: null });
     const { signal } = flight.controller;
     try {
       const started = await this.options.client.start(
@@ -217,7 +266,10 @@ export class RadioRefill {
       const untouched = this.options.userActionSeq() === flight.user.seq;
       const somethingElse = snapshot.program !== null || upcomingEntries(snapshot).length > 0;
       if (!untouched && somethingElse) return this.discard(flight, "user-chose-other");
-      play = untouched;
+      play = untouched && flight.user.autoplay;
+      // Enqueue into an exhausted queue starts by itself; a start the listener
+      // paused or overtook must not sound that way either.
+      if (!play && snapshot.transport === "exhausted") return this.discard(flight, "start-withdrawn");
     } else if (refillContext(snapshot)?.key !== flight.key) {
       return this.discard(flight, "context-changed");
     }
@@ -245,31 +297,34 @@ export class RadioRefill {
     this.evaluate();
   }
 
-  private onFailure(context: Context, user: { seq: number } | null, error: ErrorInfo, attempt: number): void {
+  private onFailure(context: Context, user: UserStart | null, error: ErrorInfo, attempt: number): void {
     this.log({ level: "warn", event: "refill.failed", at: this.clock(), data: { key: context.key, attempt, error } });
+    const userInitiated = user !== null;
     if (error.code === "no_candidate") {
       this.stopped.add(context.key);
-      return this.publish({ phase: "no-candidate", userInitiated: user !== null, attempts: attempt, lastError: error });
+      return this.publish({ phase: "no-candidate", userInitiated, autoplay: false, attempts: attempt, lastError: error });
     }
     if (attempt >= this.policy.maxAttempts || error.class === "invalid" || error.class === "auth-required") {
       this.stopped.add(context.key);
-      return this.publish({ phase: "gave-up", userInitiated: user !== null, attempts: attempt, lastError: error });
+      return this.publish({ phase: "gave-up", userInitiated, autoplay: false, attempts: attempt, lastError: error });
     }
+    // A listener start that was paused/stopped meanwhile is not retried.
+    if (user && !user.autoplay) return this.publish(IDLE);
     const wait = this.policy.backoffMs[Math.min(attempt - 1, this.policy.backoffMs.length - 1)] ?? 5000;
-    this.publish({ phase: "retry-wait", userInitiated: user !== null, attempts: attempt, lastError: error });
+    this.publish({ phase: "retry-wait", userInitiated, autoplay: user?.autoplay === true, attempts: attempt, lastError: error });
     const handle = this.timers.setTimeout(() => {
       if (this.retryTimer?.handle !== handle) return;
       this.retryTimer = null;
       if (this.disposed) return;
       if (user) {
-        // A user start is retried only while nothing else was asked for.
-        if (this.options.userActionSeq() !== user.seq) return this.publish(IDLE);
+        // A user start is retried only while nothing else was asked for and it still wants to play.
+        if (this.options.userActionSeq() !== user.seq || !user.autoplay) return this.publish(IDLE);
         void this.run(context, user);
         return;
       }
       this.evaluate();
     }, wait);
-    this.retryTimer = { key: context.key, handle };
+    this.retryTimer = { key: context.key, handle, user };
   }
 
   private cancelInFlight(reason: string): void {

@@ -34,6 +34,10 @@ export interface PlaybackSessionOptions {
   readonly settings: () => AppSettings;
   /** Catalog used to map the old queue's song ids during the one-time import. */
   readonly loadCatalog: (signal: AbortSignal) => Promise<CatalogIndex>;
+  /** Deadline for loadCatalog; playback starts without the import when it passes. */
+  readonly catalogTimeoutMs?: number;
+  /** Test seam; the app always uses the browser driver. */
+  readonly createDriver?: typeof createBrowserDriver;
   readonly log?: LogPort;
 }
 
@@ -116,30 +120,36 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
   const createRuntime = async (): Promise<PlaybackRuntime> => {
     startup.set({ status: "starting" });
     let driver: Awaited<ReturnType<typeof createBrowserDriver>> | null = null;
+    // Every await below can outlive the session (page closed, StrictMode
+    // cleanup): after each one, a disposed session builds nothing further.
+    const ensureLive = () => {
+      if (shutdown.signal.aborted) throw new Error("playback session disposed during executor start");
+    };
     try {
+      ensureLive();
       const executorInstanceId = newInstanceId();
       const ids = withReservations(createSequentialIds(executorInstanceId));
       const queueStore = createQueueStore(options.storage);
       let legacyImport: LegacyImportResult = { status: "not-needed", reason: "no-legacy-data" };
       try {
-        const catalog = await options.loadCatalog(shutdown.signal);
+        const catalog = await withDeadline(options.loadCatalog, shutdown.signal, options.catalogTimeoutMs ?? 8000);
+        ensureLive();
         legacyImport = importLegacyQueue(
           options.storage,
           queueStore,
-          (songId) => {
-            const entry = catalog.byLegacyId(songId);
-            return entry ? { track: entry.ref, display: entry.display } : null;
-          },
+          (songId) => catalog.legacyLookup(songId),
           () => new Date().toISOString()
         );
       } catch (error) {
+        ensureLive();
         legacyImport = { status: "failed", reason: error instanceof Error ? error.message : String(error) };
       }
       log({ level: "info", event: "legacy.import", at: pageClock(), data: legacyImport });
 
       const client = new PreparationClient(options.fetchFn, options.paths);
       const prepare = new HttpPreparePort(client, { onCancelFailed: (id) => log({ level: "debug", event: "prepare.cancel-failed", at: pageClock(), data: id }) });
-      driver = await createBrowserDriver({ urls: createStreamUrls(options.paths, options.origin), log, document: typeof document === "undefined" ? null : document });
+      driver = await (options.createDriver ?? createBrowserDriver)({ urls: createStreamUrls(options.paths, options.origin), log, document: typeof document === "undefined" ? null : document });
+      ensureLive();
       const settings = options.settings();
       const runtime = createPlaybackRuntime({
         driver,
@@ -157,7 +167,17 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
       });
       const refill = new RadioRefill({ target: runtime, client, port: prepare, ids, userActionSeq: () => controller?.getUserActionSeq() ?? 0, log, clock: pageClock });
       const generation = nextExecutorGeneration(options.storage);
-      const now = new NowProjector({ source: runtime, fetchFn: options.fetchFn, path: options.paths.now, executorInstanceId, generation, clock: pageClock });
+      let released = false;
+      const now = new NowProjector({
+        source: runtime,
+        fetchFn: options.fetchFn,
+        path: options.paths.now,
+        executorInstanceId,
+        generation,
+        isCurrentOwner: () => !released && !runtime.disposed && !shutdown.signal.aborted,
+        raiseGeneration: (atLeast) => raiseExecutorGeneration(options.storage, atLeast),
+        clock: pageClock
+      });
       let lastSettings = runtime.getSnapshot().settings;
       const stopSettings = runtime.subscribe(() => {
         const next = runtime.getSnapshot().settings;
@@ -170,6 +190,9 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
       owner.set({ refill, ids });
       startup.set({ status: "ready", legacyImport });
       return new OwnedRuntime(runtime, [
+        () => {
+          released = true;
+        },
         () => owner.set(null),
         () => refill.dispose(),
         () => now.dispose(),
@@ -178,9 +201,14 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
       ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      startup.set({ status: "failed", message });
       await driver?.dispose().catch(() => {});
-      log({ level: "error", event: "executor.start-failed", at: pageClock(), data: message });
+      if (shutdown.signal.aborted) {
+        startup.set({ status: "none" });
+        log({ level: "info", event: "executor.start-abandoned", at: pageClock(), data: message });
+      } else {
+        startup.set({ status: "failed", message });
+        log({ level: "error", event: "executor.start-failed", at: pageClock(), data: message });
+      }
       throw error;
     }
   };
@@ -202,18 +230,66 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
   };
 }
 
+/** Runs `load` with the session signal plus a deadline; either aborts it. */
+async function withDeadline<T>(load: (signal: AbortSignal) => Promise<T>, outer: AbortSignal, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  let onAbort = () => controller.abort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      load(controller.signal),
+      new Promise<never>((_, reject) => {
+        // Settles at once on session dispose, even if `load` ignores its signal.
+        onAbort = () => {
+          controller.abort();
+          reject(new Error("playback session disposed"));
+        };
+        if (outer.aborted) onAbort();
+        outer.addEventListener("abort", onAbort, { once: true });
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`catalog not loaded within ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+    outer.removeEventListener("abort", onAbort);
+  }
+}
+
 export const GENERATION_KEY = "claudio.executor.generation.v1";
+
+/** A stored generation, or null when missing/unreadable. Only plain decimal safe integers count. */
+function readGeneration(storage: SafeStorage): number | null {
+  const raw = storage.getItem(GENERATION_KEY);
+  if (raw === null || !/^\d{1,16}$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
 
 /**
  * Same-origin executor generation: only the lock holder calls this, so a
- * read-increment-write cannot race another executor of this origin. An
- * unreadable value restarts from the current time (still increasing).
+ * read-increment-write cannot race another executor of this origin. Missing
+ * starts at 1; unreadable restarts from the current time (still increasing
+ * for any value this code wrote). A server that kept a higher generation
+ * (storage cleared) is caught up once by the now projector.
  */
-export function nextExecutorGeneration(storage: SafeStorage): number {
-  const stored = Number(storage.getItem(GENERATION_KEY));
-  const next = Number.isSafeInteger(stored) && stored >= 0 ? stored + 1 : Date.now();
+export function nextExecutorGeneration(storage: SafeStorage, now: () => number = Date.now): number {
+  const raw = storage.getItem(GENERATION_KEY);
+  const stored = readGeneration(storage);
+  const next = stored === null ? (raw === null ? 1 : Math.floor(now())) : Number.isSafeInteger(stored + 1) ? stored + 1 : stored;
   storage.setItem(GENERATION_KEY, String(next));
   return next;
+}
+
+/** Monotonic raise to at least `atLeast`; returns the generation in force, null when it cannot be represented. */
+export function raiseExecutorGeneration(storage: SafeStorage, atLeast: number): number | null {
+  if (!Number.isSafeInteger(atLeast) || atLeast < 0) return null;
+  const stored = readGeneration(storage);
+  const value = Math.max(stored ?? 0, atLeast);
+  if (value !== stored) storage.setItem(GENERATION_KEY, String(value));
+  return value;
 }
 
 /** Bounded in-memory log for diagnostics; never persisted or sent anywhere. */

@@ -3,15 +3,9 @@
 import { API_V1_PATHS, PROTOCOL_VERSION, asId, type CandidateV1, type MediaId, type PreparedItemV1, type ProviderId, type QueueItemId, type ResolvedMediaWire, type Stage, type TrackRef } from "@claudio/contracts";
 import type { Timers } from "@claudio/playback-web";
 import type { FetchLike } from "./http";
-import type { ProtocolPaths } from "./protocol";
+import { SHARED_PATHS, type ProtocolPaths } from "./protocol";
 
-export const TEST_PATHS: ProtocolPaths = {
-  ...API_V1_PATHS,
-  streams: "/api/v1/playback/streams/:token",
-  narrationCue: "/api/v1/playback/narration/:cueId",
-  startedHistory: "/api/v1/history/started",
-  catalogSearch: "/api/v1/catalog/search"
-};
+export const TEST_PATHS: ProtocolPaths = SHARED_PATHS;
 
 export function ref(mediaId: string, providerId = "fixture"): TrackRef {
   return { providerId: asId<ProviderId>(providerId), mediaId: asId<MediaId>(mediaId) };

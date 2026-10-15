@@ -303,13 +303,13 @@ export async function setTaste(trackId: string, action: string, active: boolean,
   if (!response.ok || result?.ok !== true) throw new Error(result?.error ?? `偏好保存失败（HTTP ${response.status}）`);
 }
 
-/** Raw library rows; the playback catalog decodes the TrackRef each row may carry. */
-export async function getLibraryRows(signal?: AbortSignal, limit = 5000): Promise<unknown[]> {
+/** Raw library rows and the library's own total; the playback catalog decodes the TrackRef each row may carry. */
+export async function getLibraryRows(signal?: AbortSignal, limit = 5000): Promise<{ readonly rows: unknown[]; readonly total: number | null }> {
   const url = new URL("/api/library", window.location.origin);
   url.searchParams.set("q", "");
   url.searchParams.set("limit", String(limit));
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`曲库读取失败（HTTP ${response.status}）`);
   const result = await response.json();
-  return Array.isArray(result?.tracks) ? result.tracks : [];
+  return { rows: Array.isArray(result?.tracks) ? result.tracks : [], total: typeof result?.total === "number" ? result.total : null };
 }

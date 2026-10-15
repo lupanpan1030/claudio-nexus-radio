@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { PlaybackSnapshot } from "@claudio/contracts";
 import { loadFoliaStage } from "./folia-loader";
 import { toFoliaInput } from "./folia-input";
-import { FoliaStageController } from "./stage-controller";
+import { FoliaStageController, stageDraws } from "./stage-controller";
 import type { FoliaHandleLike, FoliaInputLike, FoliaMount, FoliaPin } from "./folia-types";
 
 const pin: FoliaPin = { name: "claudio-folia-stage", version: "0.1.0", contractVersion: 2, sourceSha256: "src", entry: "folia-stage.js", entrySha256: "entry", stageGitCommit: "c", base: "/vendor/folia-stage/" };
@@ -34,18 +34,19 @@ function musicSnapshot(clock: { positionMs: number; observedAt: number; rate: nu
     version,
     transport: "playing",
     display: { kind: "music", itemId: "i1", deck: "A", loadId: "L1", sourceRevision: "rev1", lyrics: { status: "loading" } },
-    decks: { A: { loadId: "L1", recordingId: "rec1", clock }, B: { loadId: "L0", recordingId: "old", clock: { positionMs: 99, observedAt: 1, rate: 1 } } }
+    decks: { A: { loadId: "L1", recordingId: "rec1", clock, seekEpoch: 3 }, B: { loadId: "L0", recordingId: "old", clock: { positionMs: 99, observedAt: 1, rate: 1 }, seekEpoch: 9 } }
   } as unknown as PlaybackSnapshot;
 }
 
 test("mapper binds identity and clock to the displayed load only; observer samples keep their original observedAt", () => {
   const sample = { loadId: "L1", positionMs: 1000, observedAt: 1000, rate: 1, source: "snapshot" } as const;
-  const input = toFoliaInput(musicSnapshot({ positionMs: 1000, observedAt: 1000, rate: 1 }), sample as never, 0);
+  const input = toFoliaInput(musicSnapshot({ positionMs: 1000, observedAt: 1000, rate: 1 }), sample as never);
   assert.deepEqual(input.display, { kind: "music", itemId: "i1", loadId: "L1", sourceRevision: "rev1", recordingId: "rec1", lyrics: { status: "loading" } });
   assert.equal(input.clock?.observedAt, 1000, "never re-stamped as fresh");
-  const otherLoad = toFoliaInput(musicSnapshot(null), { ...sample, loadId: "L0" } as never, 0);
+  assert.equal(input.clock?.seekEpoch, 3, "the displayed load's core seek epoch, identical for owner and observers");
+  const otherLoad = toFoliaInput(musicSnapshot(null), { ...sample, loadId: "L0" } as never);
   assert.equal(otherLoad.clock, null);
-  const voice = toFoliaInput({ ...musicSnapshot(null), display: { kind: "voice", cueId: "c1", transitionId: "t", subtitle: null, text: "x" } } as unknown as PlaybackSnapshot, null, 0);
+  const voice = toFoliaInput({ ...musicSnapshot(null), display: { kind: "voice", cueId: "c1", transitionId: "t", subtitle: null, text: "x" } } as unknown as PlaybackSnapshot, null);
   assert.deepEqual(voice.display, { kind: "voice", cueId: "c1" });
 });
 
@@ -53,6 +54,8 @@ class FakeHandle implements FoliaHandleLike {
   readonly inputs: FoliaInputLike[] = [];
   destroyed = false;
   visible = true;
+  diagnostics: { renderer: string; status: string | null; mode: string } = { renderer: "ready", status: null, mode: "lattice" };
+  diagnosticReads = 0;
   update(input: FoliaInputLike) {
     const last = this.inputs.at(-1);
     if (this.destroyed) return { accepted: false as const, reason: "destroyed" };
@@ -68,7 +71,8 @@ class FakeHandle implements FoliaHandleLike {
     this.destroyed = true;
   }
   getDiagnostics() {
-    return { renderer: "ready", status: null, mode: "lattice" };
+    this.diagnosticReads += 1;
+    return this.diagnostics;
   }
 }
 
@@ -107,4 +111,71 @@ test("controller: one handle per executor epoch, fresh sequence on takeover, lat
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(handles.length, before, "no mount after detach");
   assert.equal(slow.state.get().phase, "off");
+});
+
+class StepTimers {
+  private next = 0;
+  readonly pending = new Map<number, () => void>();
+  setTimeout(callback: () => void) {
+    const id = ++this.next;
+    this.pending.set(id, callback);
+    return id;
+  }
+  clearTimeout(handle: unknown) {
+    this.pending.delete(handle as number);
+  }
+  tick() {
+    const due = [...this.pending];
+    this.pending.clear();
+    for (const [, callback] of due) callback();
+  }
+}
+
+test("drawing means the canvas is really shown: starting or clock-less renderers keep basic lyrics", () => {
+  assert.equal(stageDraws({ mode: "lattice", renderer: "creating", status: "renderer-starting" }), false);
+  assert.equal(stageDraws({ mode: "lattice", renderer: "ready", status: "awaiting-clock" }), false);
+  assert.equal(stageDraws({ mode: "lattice", renderer: "failed", status: "renderer-failed" }), false);
+  assert.equal(stageDraws({ mode: "status", renderer: "ready", status: null }), false);
+  assert.equal(stageDraws({ mode: "lattice", renderer: "ready", status: null }), true);
+});
+
+test("an asynchronously ready renderer flips drawing without new input; the probe is bounded and cancelled", async () => {
+  const first = new FakeHandle();
+  // The real stage reports renderer-starting right after its first timed input.
+  first.diagnostics = { renderer: "creating", status: "renderer-starting", mode: "lattice" };
+  const mount: FoliaMount = () => first;
+  const timers = new StepTimers();
+  const controller = new FoliaStageController(async () => ({ ok: true, mount }), {}, { intervalMs: 150, maxProbes: 5 }, timers);
+  controller.attach({} as HTMLElement);
+  await new Promise((resolve) => setImmediate(resolve));
+  const paused = { display: { kind: "none" as const }, clock: null, transport: "paused" as const };
+  controller.push("exec-1", paused);
+  assert.equal(controller.state.get().drawing, false, "renderer starting: basic lyrics stay");
+  assert.equal(timers.pending.size, 1, "one probe pending");
+  timers.tick();
+  assert.equal(controller.state.get().drawing, false);
+  first.diagnostics = { renderer: "ready", status: null, mode: "lattice" };
+  timers.tick(); // no push: the song is paused / the observer gets nothing new
+  assert.equal(controller.state.get().drawing, true, "ready + no status: the stage draws now");
+  assert.equal(timers.pending.size, 0, "probe ends once the renderer settled");
+
+  // awaiting-clock never counts as drawing and needs no probe (only new input changes it).
+  first.diagnostics = { renderer: "ready", status: "awaiting-clock", mode: "lattice" };
+  controller.push("exec-1", paused);
+  assert.equal(controller.state.get().drawing, false);
+  assert.equal(timers.pending.size, 0);
+
+  // A renderer that never finishes starting: at most maxProbes reads, then it stops.
+  first.diagnostics = { renderer: "creating", status: "renderer-starting", mode: "lattice" };
+  controller.push("exec-1", paused);
+  const reads = first.diagnosticReads;
+  for (let index = 0; index < 20; index += 1) timers.tick();
+  assert.equal(first.diagnosticReads - reads, 5, "bounded");
+  assert.equal(timers.pending.size, 0);
+
+  controller.push("exec-1", paused);
+  assert.equal(timers.pending.size, 1);
+  controller.detach();
+  assert.equal(timers.pending.size, 0, "detach cancels the probe");
+  assert.equal(first.destroyed, true);
 });

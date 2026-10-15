@@ -13,9 +13,12 @@ import type { FoliaDisplayLike, FoliaInputLike } from "./folia-types";
  *   Claudio draws the subtitle itself.
  * - clock: only a sample of exactly the displayed load; an observer passes
  *   the executor's sample untouched (original observedAt) so a silent
- *   executor freezes the lyrics instead of letting them run on.
+ *   executor freezes the lyrics instead of letting them run on. seekEpoch is
+ *   the core's DeckSnapshot.seekEpoch of that load, the same on the owner and
+ *   every observer: a real seek (also a tiny backward one) re-anchors the
+ *   stage, sampling jitter does not.
  */
-export function toFoliaInput(snapshot: PlaybackSnapshot | null, sample: MusicSample | null, seekEpoch: number): Omit<FoliaInputLike, "version"> {
+export function toFoliaInput(snapshot: PlaybackSnapshot | null, sample: MusicSample | null): Omit<FoliaInputLike, "version"> {
   if (!snapshot) return { display: { kind: "none" }, clock: null, transport: "idle" };
   const shown = snapshot.display;
   let display: FoliaDisplayLike = { kind: "none" };
@@ -32,7 +35,7 @@ export function toFoliaInput(snapshot: PlaybackSnapshot | null, sample: MusicSam
       lyrics: shown.lyrics
     };
     if (sameLoad && sample && sample.loadId === shown.loadId) {
-      clock = { loadId: sample.loadId, positionMs: sample.positionMs, observedAt: sample.observedAt, rate: sample.rate, seekEpoch };
+      clock = { loadId: sample.loadId, positionMs: sample.positionMs, observedAt: sample.observedAt, rate: sample.rate, seekEpoch: deck.seekEpoch };
     }
   } else if (shown.kind === "voice") {
     display = { kind: "voice", cueId: shown.cueId };

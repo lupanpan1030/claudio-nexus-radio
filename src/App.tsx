@@ -24,7 +24,7 @@ import { ClickSpark } from "./components/ClickSpark";
 import { SideRays } from "./components/SideRays";
 
 const NO_STARTUP: OwnerStartup = { status: "none" };
-const IDLE_REFILL: RefillStatus = { phase: "idle", userInitiated: false, attempts: 0, lastError: null };
+const IDLE_REFILL: RefillStatus = { phase: "idle", userInitiated: false, autoplay: false, attempts: 0, lastError: null };
 const noopSubscribe = () => () => {};
 
 export function App() {
@@ -103,7 +103,7 @@ function RadioApp() {
 
   const notice = playbackNotice({ protocol, view, startup, refill });
   const playedCount = snapshot ? snapshot.history.filter((entry) => entry.started).length + (snapshot.program?.started ? 1 : 0) : 0;
-  const busy = snapshot?.transport === "requested" || snapshot?.transport === "loading" || (refill.userInitiated && refill.phase === "selecting");
+  const busy = snapshot?.transport === "requested" || snapshot?.transport === "loading" || (refill.autoplay && refill.phase === "selecting");
   const weekday = now.toLocaleDateString("zh-CN", { weekday: "long" });
   const dateStamp = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).replaceAll(" ", " / ").toUpperCase();
   const fishStatus = snapshot?.voice?.status === "failed" ? "offline" : voice.text ? "online" : "standby";
@@ -149,8 +149,9 @@ function RadioApp() {
               taste={taste}
               canPrevious={controller?.canPrevious(snapshot) ?? false}
               busy={busy}
+              starting={refill.autoplay}
               lyrics={(visible) => (
-                <LyricsPanel view={view} live={live} visible={visible} stageEnabled={settings.stageEnabled} seekEpoch={view.canControl ? (controller?.seekEpoch ?? 0) : 0} onStageToggle={(stageEnabled) => updateSettings({ stageEnabled })} />
+                <LyricsPanel view={view} live={live} visible={visible} stageEnabled={settings.stageEnabled} onStageToggle={(stageEnabled) => updateSettings({ stageEnabled })} />
               )}
               onHostProfileOpen={openHostProfile}
             />

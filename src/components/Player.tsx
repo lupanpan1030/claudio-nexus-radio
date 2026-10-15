@@ -6,7 +6,7 @@ import { ElasticVolumeSlider } from "./ElasticVolumeSlider";
 import { createWaveMemory, formatClock, shapeWave, WAVE_BARS } from "./wave";
 import { useProgramPosition, useVoicePosition } from "../app/hooks";
 import { wantsPlayback, type PlaybackController } from "../playback/controller";
-import { activeSegmentIndex, subtitleLines } from "../playback/subtitles";
+import { activeSegmentIndex, PROVENANCE_LABEL, subtitleLines } from "../playback/subtitles";
 import type { VoiceControls } from "../playback/voice-model";
 import type { TasteState } from "../features/taste";
 import "./Player.transcript.css";
@@ -28,6 +28,8 @@ type PlayerProps = {
   taste: TasteState;
   canPrevious: boolean;
   busy: boolean;
+  /** A radio start from an empty queue will play when its pick arrives (the main button then cancels it). */
+  starting: boolean;
   lyrics: (visible: boolean) => ReactNode;
   onHostProfileOpen: (trigger: HTMLButtonElement) => void;
 };
@@ -39,14 +41,15 @@ const SILENT_LEVELS: readonly number[] = Object.freeze(Array(WAVE_BARS).fill(0))
  * and read-only clock/spectrum readers; every button calls the controller.
  * No media element, AudioContext or volume automation lives here.
  */
-export function Player({ view, live, spectrum, controller, track, caption, voice, taste, canPrevious, busy, lyrics, onHostProfileOpen }: PlayerProps) {
+export function Player({ view, live, spectrum, controller, track, caption, voice, taste, canPrevious, busy, starting, lyrics, onHostProfileOpen }: PlayerProps) {
   const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
   const [clockTime, setClockTime] = useState(() => new Date());
   const [voiceLevels, setVoiceLevels] = useState<readonly number[]>(SILENT_LEVELS);
   const activeTranscriptRef = useRef<HTMLParagraphElement | null>(null);
   const snapshot = view.snapshot;
   const canControl = view.canControl && controller !== null;
-  const isPlaying = wantsPlayback(snapshot);
+  // Same rule as controller.togglePlay: "pause" also while a radio start is on its way to playing.
+  const isPlaying = wantsPlayback(snapshot) || starting;
   const isSongWaveActive = snapshot?.transport === "playing";
   const program = snapshot?.program ?? null;
   const programDeck = program?.deck ? snapshot?.decks[program.deck] : null;
@@ -217,7 +220,7 @@ export function Player({ view, live, spectrum, controller, track, caption, voice
                 ) : (
                   transcript.map((line, index) => (
                     <p ref={index === activeTranscriptIndex ? activeTranscriptRef : undefined} key={`${index}-${line}`} className={index === activeTranscriptIndex ? "active" : timedTranscript ? "" : "plain"}>
-                      <small>{timedTranscript ? "Claudio · 按口播时间" : "Claudio · 全文"}</small>
+                      <small>{!timedTranscript ? "Claudio · 全文" : voice.subtitle?.timing === "estimated" ? `Claudio · ${PROVENANCE_LABEL.estimated}` : "Claudio · 按口播时间"}</small>
                       {timedTranscript ? (
                         <span className="karaoke-line">
                           {[...line].map((character, charIndex) => (

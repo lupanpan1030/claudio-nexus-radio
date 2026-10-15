@@ -9,11 +9,14 @@ import { voiceControls } from "./voice-model";
 import { activeLyricIndex, activeSegmentIndex, lyricsStatusText, subtitleLines } from "./subtitles";
 import { ref } from "./test-support";
 
-const catalog = CatalogIndex.fromLibraryRows([
-  { id: "song-a", title: "晴天", artist: "周杰伦", ref: ref("A", "kugou") },
-  { id: "song-b", title: "后来", artist: "刘若英", ref: ref("B", "kugou") },
-  { id: "song-legacy-only", title: "无 ref", artist: "x" }
-]);
+const catalog = CatalogIndex.fromLibraryRows(
+  [
+    { id: "song-a", title: "晴天", artist: "周杰伦", ref: ref("A", "kugou") },
+    { id: "song-b", title: "后来", artist: "刘若英", ref: ref("B", "kugou") },
+    { id: "song-legacy-only", title: "无 ref", artist: "x" }
+  ],
+  3
+);
 
 function snapshot(partial: Partial<Record<string, unknown>>): PlaybackSnapshot {
   return { transport: "idle", program: null, queue: [], history: [], voice: null, narration: { retained: null, replay: { available: false, reason: "no-narration" } }, ...partial } as unknown as PlaybackSnapshot;
@@ -92,10 +95,7 @@ test("legacy import: backs up both old keys, maps known songs, skips unknown, ru
   storage.setItem(LEGACY_QUEUE_KEY, oldQueue);
   storage.setItem(LEGACY_PLAYLIST_KEY, oldPlaylist);
   const store = memoryQueueStore(storage);
-  const lookup = (songId: string) => {
-    const entry = catalog.byLegacyId(songId);
-    return entry ? { track: entry.ref, display: entry.display } : null;
-  };
+  const lookup = (songId: string) => catalog.legacyLookup(songId);
   const result = importLegacyQueue(storage, store, lookup, () => "2026-10-16T00:00:00.000Z");
   assert.deepEqual(result, { status: "imported", imported: 2, skipped: ["song-gone"] });
   assert.deepEqual(store.saved[0]?.map((entry) => entry.track.mediaId), ["A", "B"]);

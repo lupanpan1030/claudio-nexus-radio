@@ -10,6 +10,41 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON";
 }
 
+/** The part of MediaSession this module touches (lets tests pass a recording fake). */
+export type MediaSessionActions = Pick<MediaSession, "setActionHandler">;
+
+/**
+ * Registers the media-key actions on `session` and returns the cleanup.
+ * Explicit actions are idempotent: "play" never pauses and "pause" never
+ * resumes, whatever the current state; only Space and the main button toggle.
+ */
+export function registerMediaSessionActions(session: MediaSessionActions, controller: Pick<PlaybackController, "play" | "pause" | "next" | "previous">): () => void {
+  const actions: [MediaSessionAction, MediaSessionActionHandler][] = [
+    ["play", () => controller.play()],
+    ["pause", () => controller.pause()],
+    ["nexttrack", () => controller.next()],
+    ["previoustrack", () => controller.previous()]
+  ];
+  const registered: MediaSessionAction[] = [];
+  for (const [action, handler] of actions) {
+    try {
+      session.setActionHandler(action, handler);
+      registered.push(action);
+    } catch {
+      // Unsupported action in this browser.
+    }
+  }
+  return () => {
+    for (const action of registered) {
+      try {
+        session.setActionHandler(action, null);
+      } catch {
+        // Ignore.
+      }
+    }
+  };
+}
+
 /**
  * Media keys (Media Session) and the Space shortcut, registered only on the
  * executor page and mapped to the same controller as the buttons. Typing in
@@ -35,28 +70,7 @@ export function useMediaControls(controller: PlaybackController | null, view: Ho
   useEffect(() => {
     const session = typeof navigator === "undefined" ? undefined : navigator.mediaSession;
     if (!session || !canControl || !controller) return;
-    const actions: [MediaSessionAction, MediaSessionActionHandler][] = [
-      ["play", () => controller.togglePlay()],
-      ["pause", () => controller.togglePlay()],
-      ["nexttrack", () => controller.next()],
-      ["previoustrack", () => controller.previous()]
-    ];
-    for (const [action, handler] of actions) {
-      try {
-        session.setActionHandler(action, handler);
-      } catch {
-        // Unsupported action in this browser.
-      }
-    }
-    return () => {
-      for (const [action] of actions) {
-        try {
-          session.setActionHandler(action, null);
-        } catch {
-          // Ignore.
-        }
-      }
-    };
+    return registerMediaSessionActions(session, controller);
   }, [canControl, controller]);
 
   useEffect(() => {

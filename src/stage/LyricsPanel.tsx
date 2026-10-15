@@ -31,8 +31,6 @@ export function LyricsPanel(props: {
   readonly live: ClockReader | null;
   readonly visible: boolean;
   readonly stageEnabled: boolean;
-  /** Seek counter of the executor page (0 on observers). */
-  readonly seekEpoch: number;
   readonly onStageToggle: (enabled: boolean) => void;
 }) {
   const { view, live, visible, stageEnabled } = props;
@@ -61,13 +59,24 @@ export function LyricsPanel(props: {
 
   useEffect(() => controller?.setVisible(visible), [controller, visible]);
 
+  // Dev builds only: lets the browser acceptance tool read what the stage shows.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !controller) return;
+    const target = window as unknown as { __claudioStage?: unknown };
+    const reader = Object.freeze({ state: () => controller.state.get(), diagnostics: () => controller.diagnostics() });
+    target.__claudioStage = reader;
+    return () => {
+      if (target.__claudioStage === reader) delete target.__claudioStage;
+    };
+  }, [controller]);
+
   // Owner: feed live samples of the displayed load ~4×/s while playing; observer: only broadcast samples.
   const playing = snapshot?.transport === "playing";
   const tick = useTicker(Boolean(controller) && visible && playing && view.canControl, 250);
   useEffect(() => {
     if (!controller) return;
-    controller.push(view.executorInstanceId, toFoliaInput(snapshot, displayedMusicSample(snapshot, view.canControl ? live : null), props.seekEpoch));
-  }, [controller, snapshot, view.executorInstanceId, view.canControl, live, tick, props.seekEpoch]);
+    controller.push(view.executorInstanceId, toFoliaInput(snapshot, displayedMusicSample(snapshot, view.canControl ? live : null)));
+  }, [controller, snapshot, view.executorInstanceId, view.canControl, live, tick]);
 
   const voiceLines = display.kind === "voice" ? subtitleLines(display.subtitle, display.text) : [];
   const voiceActive = display.kind === "voice" && voicePosition !== null ? activeSegmentIndex(display.subtitle, voicePosition) : -1;

@@ -43,22 +43,90 @@ export function createQueueStore(storage: KeyValueStorage): QueueStore {
 }
 
 export type LegacyImportResult =
-  | { readonly status: "not-needed"; readonly reason: "new-queue-exists" | "already-imported" | "no-legacy-data" }
+  | { readonly status: "not-needed"; readonly reason: "already-imported" | "no-legacy-data" }
   | { readonly status: "imported"; readonly imported: number; readonly skipped: readonly string[] }
+  /**
+   * Not imported this time, nothing marked: the server could not yet state a
+   * TrackRef for some old songs (or the stored queue was unreadable). The old
+   * keys and the backup stay; the next executor start tries again.
+   */
+  | { readonly status: "deferred"; readonly reason: "mapping-unavailable" | "queue-unreadable" | "storage-failed"; readonly pending: readonly string[] }
   | { readonly status: "failed"; readonly reason: string };
 
-/** Resolves an old queue song id to a queue entry via server-stated catalog data; null = unknown, skipped. */
-export type LegacyLookup = (songId: string) => Pick<QueueEntryRequest, "track" | "display"> | null;
+/**
+ * What the server says about one old queue song id:
+ * - found: a server-stated TrackRef;
+ * - gone: the server lists it without any provider (`ref: null`) or no longer has it;
+ * - unmapped: the server has not stated a mapping (older server, truncated list):
+ *   asking again later may succeed, so it is never treated as gone.
+ */
+export type LegacyLookupResult =
+  | { readonly status: "found"; readonly entry: Pick<QueueEntryRequest, "track" | "display"> }
+  | { readonly status: "gone" }
+  | { readonly status: "unmapped" };
+
+export type LegacyLookup = (songId: string) => LegacyLookupResult;
+
+/** Same bound the versioned queue store decodes; a longer list would not load at all. */
+const MAX_STORED_QUEUE = 500;
+
+interface ImportMark {
+  readonly complete: boolean;
+}
 
 /**
- * One-time import of the old app's queue into the new versioned store. Runs
- * before the runtime restores. Never touches the old keys: their raw strings
- * are copied to a backup key first, then a mark records the import so it is
- * not repeated. Unknown songs are skipped and reported, never guessed.
+ * A version 2 mark is final only with status "complete". A version 1 mark
+ * that imported nothing but skipped songs came from a client that could not
+ * map ids at all; it is not a finished import and is retried.
+ */
+function readMark(raw: string | null): ImportMark | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { complete: true };
+  }
+  if (!isRecord(parsed)) return { complete: true };
+  if (parsed.version === 2) return { complete: parsed.status === "complete" };
+  if (parsed.version === 1 && parsed.imported === 0 && Array.isArray(parsed.skipped) && parsed.skipped.length > 0) return { complete: false };
+  return { complete: true };
+}
+
+/** Entries already in the new store, or null when its stored value is present but unreadable (never overwritten). */
+function currentEntries(storage: KeyValueStorage, store: QueueStore): readonly QueueEntryRequest[] | null {
+  const entries = store.load();
+  if (entries.length > 0) return entries;
+  const raw = storage.getItem(QUEUE_KEY);
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed) && parsed.version === 1 && Array.isArray(parsed.entries) && parsed.entries.length === 0) return [];
+  } catch {
+    // Unreadable: fall through.
+  }
+  return null;
+}
+
+/**
+ * Import of the old app's queue into the new versioned store, before the
+ * runtime restores (stopped). Never touches the old keys: their raw strings
+ * are copied to a backup key first.
+ *
+ * All or nothing per attempt: while the server cannot state a TrackRef for
+ * some old song, nothing is imported or marked and a later start retries.
+ * Songs the server lists without any provider, or no longer has, are skipped
+ * and reported. Imported entries are appended after whatever the new store
+ * already holds (e.g. radio picks made while the import waited), so a late
+ * import never drops either queue.
+ *
+ * Exactly once: the finished mark is written and read back before the
+ * entries are saved, so a repeated run can never append them twice; if the
+ * save does not stick, the mark is withdrawn again.
  */
 export function importLegacyQueue(storage: KeyValueStorage, store: QueueStore, lookup: LegacyLookup, nowIso: () => string): LegacyImportResult {
-  if (storage.getItem(QUEUE_KEY) !== null) return { status: "not-needed", reason: "new-queue-exists" };
-  if (storage.getItem(LEGACY_IMPORT_MARK_KEY) !== null) return { status: "not-needed", reason: "already-imported" };
+  const previousMark = storage.getItem(LEGACY_IMPORT_MARK_KEY);
+  if (readMark(previousMark)?.complete) return { status: "not-needed", reason: "already-imported" };
   const rawQueue = storage.getItem(LEGACY_QUEUE_KEY);
   const rawPlaylist = storage.getItem(LEGACY_PLAYLIST_KEY);
   if (rawQueue === null && rawPlaylist === null) return { status: "not-needed", reason: "no-legacy-data" };
@@ -76,6 +144,7 @@ export function importLegacyQueue(storage: KeyValueStorage, store: QueueStore, l
   }
   const entries: QueueEntryRequest[] = [];
   const skipped: string[] = [];
+  const pending: string[] = [];
   if (Array.isArray(picks)) {
     for (const pick of picks) {
       if (!isRecord(pick) || typeof pick.songId !== "string") {
@@ -84,19 +153,40 @@ export function importLegacyQueue(storage: KeyValueStorage, store: QueueStore, l
       }
       const stated = decodeRef(pick.track);
       const known = lookup(pick.songId);
-      const track = stated ?? known?.track ?? null;
-      if (!track) {
+      if (stated) {
+        entries.push({ track: stated, display: known.status === "found" ? known.entry.display : null, origin: "restore" });
+      } else if (known.status === "found") {
+        entries.push({ track: known.entry.track, display: known.entry.display, origin: "restore" });
+      } else if (known.status === "unmapped") {
+        pending.push(pick.songId);
+      } else {
         skipped.push(pick.songId);
-        continue;
       }
-      entries.push({ track, display: known?.display ?? null, origin: "restore" });
     }
   } else {
     skipped.push("(unreadable legacy queue)");
   }
-  if (entries.length > 0) store.save(entries);
-  storage.setItem(LEGACY_IMPORT_MARK_KEY, JSON.stringify({ version: 1, importedAt: nowIso(), imported: entries.length, skipped }));
-  return { status: "imported", imported: entries.length, skipped };
+  if (pending.length > 0) return { status: "deferred", reason: "mapping-unavailable", pending };
+
+  const existing = currentEntries(storage, store);
+  if (existing === null) return { status: "deferred", reason: "queue-unreadable", pending: [] };
+  const room = Math.max(0, MAX_STORED_QUEUE - existing.length);
+  const accepted = entries.slice(0, room);
+  if (accepted.length < entries.length) skipped.push(`(queue full: ${entries.length - accepted.length} more)`);
+
+  const mark = JSON.stringify({ version: 2, status: "complete", importedAt: nowIso(), imported: accepted.length, skipped });
+  storage.setItem(LEGACY_IMPORT_MARK_KEY, mark);
+  if (storage.getItem(LEGACY_IMPORT_MARK_KEY) !== mark) return { status: "deferred", reason: "storage-failed", pending: [] };
+  if (accepted.length > 0) {
+    store.save([...existing, ...accepted]);
+    if (store.load().length !== existing.length + accepted.length) {
+      // The save did not stick: withdraw the mark so the next start can try again.
+      if (previousMark === null) storage.setItem(LEGACY_IMPORT_MARK_KEY, JSON.stringify({ version: 2, status: "retry", at: nowIso() }));
+      else storage.setItem(LEGACY_IMPORT_MARK_KEY, previousMark);
+      return { status: "deferred", reason: "storage-failed", pending: [] };
+    }
+  }
+  return { status: "imported", imported: accepted.length, skipped };
 }
 
 /** Versioned UI settings; unknown or broken data falls back to defaults. */
