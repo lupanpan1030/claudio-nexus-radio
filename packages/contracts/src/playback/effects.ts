@@ -51,7 +51,8 @@ export type PlaybackEffect =
   /**
    * `playId` is echoed only by a `play-rejected` for the promise of this very
    * call. An executor that skips the native play() (element already rolling)
-   * reports nothing for it.
+   * reports nothing for it. A `pause` of this load still queued when it
+   * arrives is superseded by it (see the `paused` media event).
    */
   | { readonly type: "deck.play"; readonly deck: DeckId; readonly loadId: LoadId; readonly playId: PlayRequestId }
   /**
@@ -59,8 +60,9 @@ export type PlaybackEffect =
    * acknowledgement), unless the load is unloaded first:
    *  - element.paused was false: the DOM `pause` event this call causes;
    *  - element.paused was already true but a DOM `pause` event is still owed
-   *    (the element was unpaused, by the executor's own native play() or a
-   *    dispatched `play` event, more recently than the last dispatched
+   *    (the executor saw the element unpaused — its own native play(), or
+   *    element.paused found false at any call/event, even before that
+   *    `play` event was dispatched — more recently than the last dispatched
    *    `pause` event): that owed event;
    *  - otherwise (already paused, nothing owed, e.g. a play deferred until
    *    the audio context unlocks and now cancelled): report it at once from

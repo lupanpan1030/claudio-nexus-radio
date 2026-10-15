@@ -1,7 +1,10 @@
 // Browser suite entry. Imports the real @claudio/playback-core (through the
 // runtime) and the real browser driver, injecting fixture ports only. The
 // Node runner drives it through `window.e2e` and real page clicks; nothing
-// here touches media elements or gains directly.
+// here touches media elements or gains directly, except the explicitly named
+// `other*` hooks, which act as another agent / the platform would (native
+// pause()/play() on an element, AudioContext suspend/resume). A context
+// suspend is not a physical OS audio interruption.
 import { asId, type CueAsset, type ErrorInfo, type PlaybackCommand, type ResolvedMedia, type StreamHandle } from "@claudio/contracts";
 import type { CoreConfig } from "@claudio/playback-core";
 import {
@@ -66,6 +69,8 @@ const retiredDrivers: BrowserDriver[] = [];
 let context: AudioContext | null = null;
 let meter: AudioWorkletNode | null = null;
 let armed: PlaybackCommand[] = [];
+/** Every element the driver created, newest last (for the `other*` hooks only). */
+const elements: HTMLAudioElement[] = [];
 const captures = new Map<string, { resolve: (value: unknown) => void; chunks: Float32Array[]; gaps: { expected: number; actual: number }[]; expected: number | null; startFrame: number | null }>();
 
 function record(kind: string, data: unknown): void {
@@ -194,6 +199,11 @@ async function createRuntime(boot: BootOptions, instanceId: string): Promise<Pla
     timeouts: boot.timeouts,
     timeFactIntervalMs: boot.timeFactIntervalMs ?? 250,
     log,
+    createElement: () => {
+      const element = new Audio();
+      elements.push(element);
+      return element;
+    },
     outputTap: async (ac) => {
       // Test seam: a pass-through PCM meter after master. The driver still owns the graph.
       await ac.audioWorklet.addModule("/meter.js");
@@ -416,9 +426,42 @@ const e2e = {
     const voiceBins = host.spectrum.readVoice(voice);
     return { musicBins, voiceBins, musicSum: music.reduce((a, b) => a + b, 0), voiceSum: voice.reduce((a, b) => a + b, 0), voiceLevel: host.spectrum.voiceLevel() };
   },
+  /** Another agent pauses the live element playing `file` (native pause(); its `pause` event is queued). */
+  otherPause(file: string, then?: PlaybackCommand) {
+    const element = liveElement(file);
+    element.pause();
+    record("other.pause", { file, paused: element.paused, positionMs: element.currentTime * 1000 });
+    // Same task: the listener's command reaches the executor before the queued `pause` is dispatched.
+    if (then) e2e.dispatch(then);
+  },
+  /** At the element's natural end (inside its end timeupdate, paused/ended already set) dispatch `command`. */
+  atEnd(file: string, command: PlaybackCommand) {
+    const element = liveElement(file);
+    const onTime = () => {
+      if (!element.ended || !element.paused) return;
+      element.removeEventListener("timeupdate", onTime);
+      record("other.at-end", { file, paused: element.paused, ended: element.ended, positionMs: element.currentTime * 1000 });
+      e2e.dispatch(command);
+      record("other.at-end.after", { paused: element.paused, ended: element.ended, seeking: element.seeking, positionMs: element.currentTime * 1000 });
+    };
+    element.addEventListener("timeupdate", onTime);
+  },
+  /** The platform stops/starts rendering the shared output (AudioContext suspend/resume). */
+  async otherOutput(running: boolean) {
+    if (!context) throw new Error("no context");
+    await (running ? context.resume() : context.suspend());
+    record("other.output", { running, state: context.state });
+    return context.state;
+  },
   /** Seconds of the shared AudioContext for aligning events with captures. */
   contextTime: () => (context && context.state !== "closed" ? context.currentTime : null)
 };
+
+function liveElement(file: string): HTMLAudioElement {
+  const element = [...elements].reverse().find((el) => el.src.endsWith(`/media/${file}`) || el.src.endsWith(`/${file}`));
+  if (!element) throw new Error(`no element for ${file}`);
+  return element;
+}
 
 declare global {
   interface Window {

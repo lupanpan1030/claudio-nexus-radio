@@ -14,7 +14,7 @@ import {
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { cancelManualCue, clearRetainedFor, isVoiceActive, isVoiceExpired, markCueReady, pauseCue, syncRetainedNarration, voiceRate } from "./cue.js";
-import { deckPosition, holdDeck, pauseDeck, requestPlay, unloadDeck } from "./decks.js";
+import { deckPosition, holdDeck, pauseDeck, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { refreshSource } from "./prep.js";
 import {
@@ -181,15 +181,10 @@ function onDeckPaused(ctx: StepContext, deck: DeckState, event: Extract<MediaEve
   // The core's own pause may land after a later play request (hold → promote → play):
   // it answers a superseded request and is never an interruption.
   if (event.requested) return "applied";
-  if (deck.role === "program" && s.intent === "play" && deck.wantPlaying && deck.seekPendingMs !== null) {
-    // A seek raced the natural end: the end's `pause` was dispatched after the seek cleared
-    // element.ended, so it reads as unrequested. The listener just sought: play on.
-    ctx.note("decision", "pause while a seek is pending; playing on from the seek target");
-    requestPlay(ctx, deck);
-    return "applied";
-  }
   // An external pause of output that should sound (OS/media interruption) becomes a
-  // transport pause, so the voice stops with the music and resume restarts both.
+  // transport pause, so the voice stops with the music and resume restarts both. Also
+  // while a seek is pending: a pause queued before the seek's play request is superseded
+  // by the executor and never arrives here; one that does arrive was not asked for.
   if (deck.role === "program" && s.intent === "play" && deck.wantPlaying) {
     ctx.note("decision", "external pause of program deck; pausing transport");
     pauseTransport(ctx);
@@ -212,10 +207,12 @@ function onDeckEnded(ctx: StepContext, deck: DeckState): FactResult {
 
 function onDeckRejected(ctx: StepContext, deck: DeckState, reason: string): FactResult {
   const { s } = ctx;
-  if (reason === "aborted") {
-    // AbortError means a pause()/load()/end interrupted the play; that interruption
-    // arrives as its own fact and decides the state. Nothing to block on here.
-    ctx.note("decision", `deck ${deck.id} play aborted`);
+  if (deck.role === "program" && reason === "aborted") {
+    // Something else interrupted the latest play (the executor drops the ones its own
+    // pause/unload caused) and stopped waiting for it: hold the transport paused, so
+    // resume asks again instead of an unbounded loading. Not blocked: no gesture is missing.
+    ctx.note("decision", "program play aborted; pausing transport");
+    pauseTransport(ctx);
     return "applied";
   }
   if (deck.role === "program") {

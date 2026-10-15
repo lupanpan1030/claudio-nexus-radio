@@ -93,3 +93,122 @@ test("hold → promote on the same load: play #1's late playing does not record 
   assert.deepEqual(receipts, [snapshot.history[0]?.item.itemId], "only A's receipt; none for B");
   assert.equal(after.program?.item.track.mediaId, "b", "B stays the program, waiting for a gesture");
 });
+
+test("external pause → seek → play before A started: the old playing is no start; a refused play #2 leaves A unstarted; the retry records once", async () => {
+  const { runtime, elements, effects } = await setup();
+  runtime.dispatch({ type: "set-dj-enabled", enabled: false });
+  runtime.dispatch({ type: "enqueue", position: "end", entries: [entry("a")] });
+  runtime.dispatch({ type: "resume" });
+  await flush();
+  const a = elements[0]!;
+  a.playMode = "pending";
+  a.ready(200);
+  await flush();
+  assert.equal(effects("deck.play").length, 1, "play #1 issued");
+  a.pause(); // another agent pauses before any event of play #1 was dispatched
+  runtime.dispatch({ type: "seek", positionMs: 0 });
+  assert.equal(effects("deck.play").length, 2, "the seek re-asks play");
+  a.fire("play");
+  a.fire("playing"); // play #1's, queued before the external pause
+  await flush();
+  let snap = runtime.getSnapshot();
+  assert.equal(snap.program?.started, false, "the stale playing is no start");
+  assert.equal(effects("receipt.report").length, 0);
+  assert.ok(snap.queue.some((e) => e.item.track.mediaId === "a") || snap.program?.item.track.mediaId === "a");
+  a.fire("pause"); // superseded by the seek's play
+  a.completeSeek();
+  await flush();
+  snap = runtime.getSnapshot();
+  assert.equal(snap.transport, "loading", "not paused: the pause predates the listener's seek");
+  for (const pending of a.plays.splice(0)) pending.reject(new DOMException("denied", "NotAllowedError"));
+  await flush();
+  snap = runtime.getSnapshot();
+  assert.equal(snap.transport, "blocked");
+  assert.equal(snap.program?.started, false);
+  assert.equal(effects("receipt.report").length, 0);
+
+  a.playMode = "resolve";
+  runtime.dispatch({ type: "resume" });
+  await flush();
+  a.fire("play");
+  a.fire("playing");
+  await flush();
+  snap = runtime.getSnapshot();
+  assert.equal(snap.transport, "playing");
+  assert.equal(snap.program?.started, true);
+  assert.equal(effects("receipt.report").length, 1, "exactly one receipt, after the retry played");
+});
+
+test("seek back at the natural end, then an output suspend/resume: the snapshot returns to playing (no stuck waiting)", async () => {
+  const { runtime, elements, ctx, effects } = await setup();
+  runtime.dispatch({ type: "set-dj-enabled", enabled: false });
+  runtime.dispatch({ type: "enqueue", position: "end", entries: [entry("a"), entry("b")] });
+  runtime.dispatch({ type: "resume" });
+  await flush();
+  const a = elements[0]!;
+  a.ready(12);
+  await flush();
+  a.fire("play");
+  a.fire("playing");
+  await flush();
+  assert.equal(runtime.getSnapshot().transport, "playing");
+  const programDeck = runtime.getSnapshot().program!.deck!;
+  const epoch = runtime.getSnapshot().decks[programDeck].seekEpoch;
+  a.advanceTo(12);
+  a.paused = true;
+  a.ended = true;
+  runtime.dispatch({ type: "seek", positionMs: 150 }); // inside the end's task window
+  assert.equal(runtime.getSnapshot().decks[programDeck].seekEpoch, epoch + 1, "the seek is a discontinuity for clock followers");
+  a.fire("pause");
+  a.fire("ended");
+  await flush();
+  let snap = runtime.getSnapshot();
+  assert.equal(snap.program?.item.track.mediaId, "a", "the obsolete end did not advance");
+  assert.notEqual(snap.transport, "paused");
+  a.fire("play");
+  a.completeSeek();
+  a.fire("playing");
+  await flush();
+  assert.equal(runtime.getSnapshot().transport, "playing");
+  a.advanceTo(0.5);
+  void ctx.suspend();
+  await flush();
+  assert.equal(runtime.getSnapshot().transport, "waiting");
+  ctx.setState("running");
+  await flush();
+  snap = runtime.getSnapshot();
+  assert.equal(snap.transport, "playing", "the output resume reports playing again");
+  assert.equal(snap.program?.item.track.mediaId, "a");
+  assert.equal(effects("receipt.report").length, 1);
+});
+
+test("a current play aborted by someone else ends bounded in both orders: the transport pauses, resume plays and records once", async () => {
+  for (const order of ["rejection-first", "pause-event-first"] as const) {
+    const { runtime, elements, effects } = await setup();
+    runtime.dispatch({ type: "set-dj-enabled", enabled: false });
+    runtime.dispatch({ type: "enqueue", position: "end", entries: [entry("a")] });
+    runtime.dispatch({ type: "resume" });
+    await flush();
+    const a = elements[0]!;
+    a.playMode = "pending";
+    a.ready(200);
+    await flush();
+    a.pause(); // rejects play #1 with AbortError; its `pause` event is queued
+    if (order === "pause-event-first") a.fire("pause");
+    await flush();
+    if (order === "rejection-first") a.fire("pause");
+    await flush();
+    let snap = runtime.getSnapshot();
+    assert.equal(snap.transport, "paused", `${order}: bounded, not an endless loading`);
+    assert.equal(snap.program?.started, false);
+    a.playMode = "resolve";
+    runtime.dispatch({ type: "resume" });
+    await flush();
+    a.fire("play");
+    a.fire("playing");
+    await flush();
+    snap = runtime.getSnapshot();
+    assert.equal(snap.transport, "playing", order);
+    assert.equal(effects("receipt.report").length, 1, order);
+  }
+});

@@ -112,6 +112,8 @@ export interface DeckState {
    * `ended` reported meanwhile describe the element before the seek.
    */
   seekPendingMs: number | null;
+  /** deck.seek effects issued for this load (0 at load); see DeckSnapshot.seekEpoch. */
+  seekEpoch: number;
 }
 
 export interface ProgramState {
@@ -269,7 +271,8 @@ function idleDeck(id: DeckId): DeckState {
     wantPlaying: false,
     playId: null,
     pausesAwaited: 0,
-    seekPendingMs: null
+    seekPendingMs: null,
+    seekEpoch: 0
   };
 }
 

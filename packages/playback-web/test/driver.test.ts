@@ -526,3 +526,121 @@ test("play-rejected names the play request whose promise was refused; an already
   const rejections = facts.filter((f) => f.event.kind === "play-rejected").map((f) => (f.event.kind === "play-rejected" ? [f.event.playId, f.event.reason] : []));
   assert.deepEqual(rejections, [["p3", "not-allowed"]], "p1's AbortError (own pause) is not reported; p2 never called play()");
 });
+
+const mediaOf = (facts: MediaFact[], loadId: string) =>
+  facts
+    .filter((f) => f.type === "deck.media" && f.loadId === loadId && ["playing", "waiting", "paused", "seeked", "ended", "play-rejected"].includes(f.event.kind))
+    .map((f) => (f.event.kind === "paused" ? `paused:${f.event.requested ? "req" : "ext"}${f.event.atEnd ? "@end" : ""}` : f.event.kind));
+
+test("external pause → seek → play: the first play's queued playing is not reported (even while seeking); the queued pause is superseded, not an interruption", async () => {
+  const { driver, elements, facts } = await setup();
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(200);
+  driver.execute(deck("deck.play", "A", "L1")); // play #1: `play`, `playing` queued
+  a.pause(); // another agent pauses the element synchronously; its `pause` is queued
+  driver.execute({ type: "deck.seek", deck: "A", loadId: L("L1"), positionMs: 0 });
+  driver.execute(deck("deck.play", "A", "L1")); // the seek's play #2 unpauses again
+  a.fire("play");
+  a.fire("playing"); // play #1's, dispatched with seeking=true
+  a.fire("pause"); // the external pause
+  assert.deepEqual(mediaOf(facts, "L1"), [], "neither the old playing nor the superseded pause");
+  a.fire("play");
+  a.fire("waiting");
+  a.completeSeek();
+  a.fire("playing");
+  assert.deepEqual(mediaOf(facts, "L1"), ["waiting", "seeked", "playing"]);
+});
+
+test("external play whose play event is still queued → own pause → own play: the external playing is not reported, the pause answers the deck.pause", async () => {
+  const { driver, elements, facts } = await setup();
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(200);
+  void a.play(); // another agent: element.paused=false, `play`/`playing` queued, not dispatched yet
+  driver.execute(deck("deck.pause", "A", "L1"));
+  assert.deepEqual(mediaOf(facts, "L1"), [], "not acknowledged before the pause event it caused");
+  driver.execute(deck("deck.play", "A", "L1"));
+  a.fire("play");
+  a.fire("playing"); // the external play's
+  a.fire("pause");
+  a.fire("play");
+  a.fire("playing");
+  assert.deepEqual(mediaOf(facts, "L1"), ["paused:req", "playing"]);
+});
+
+test("no pause is owed for a play that never reached the element: suspended unlock → pause → play → playing is reported", async () => {
+  const { driver, ctx, elements, facts } = await setup("suspended");
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(200);
+  driver.execute(deck("deck.play", "A", "L1"));
+  driver.execute(deck("deck.pause", "A", "L1"));
+  driver.execute(deck("deck.play", "A", "L1"));
+  assert.equal(a.paused, true, "nothing reached the element yet");
+  ctx.allowResume();
+  await flush();
+  assert.equal(a.paused, false);
+  a.fire("play");
+  a.fire("playing");
+  assert.deepEqual(mediaOf(facts, "L1"), ["paused:req", "playing"]);
+});
+
+test("seek + play at the natural end: the end's queued pause and its obsolete ended keep the new play wanted, so an output resume reports playing", async () => {
+  const { driver, ctx, elements, facts } = await setup();
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(12);
+  driver.execute(deck("deck.play", "A", "L1"));
+  a.fire("play");
+  a.fire("playing");
+  a.advanceTo(12);
+  a.paused = true; // reached the end: paused/ended set, `pause` and `ended` queued
+  a.ended = true;
+  // In the end's timeupdate handler the listener seeks back; the core re-asks play with the seek.
+  driver.execute({ type: "deck.seek", deck: "A", loadId: L("L1"), positionMs: 150 });
+  driver.execute(deck("deck.play", "A", "L1"));
+  assert.deepEqual([a.ended, a.seeking, a.paused], [false, true, false]);
+  a.fire("pause");
+  a.fire("ended");
+  assert.deepEqual(mediaOf(facts, "L1"), ["playing"], "neither the end's pause nor its obsolete ended");
+  a.fire("play");
+  a.completeSeek();
+  a.fire("playing");
+  assert.deepEqual(mediaOf(facts, "L1"), ["playing", "seeked", "playing"]);
+  a.advanceTo(0.5);
+  void ctx.suspend();
+  assert.deepEqual(mediaOf(facts, "L1").slice(3), ["waiting"]);
+  ctx.setState("running");
+  assert.deepEqual(lastOf(facts, "L1"), { kind: "playing", positionMs: 500 }, "the play is still wanted after the obsolete ended");
+});
+
+test("a genuine end is still reported once; an ended dispatched while the element still is ended is never dropped", async () => {
+  const { driver, elements, facts } = await setup();
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(12);
+  driver.execute(deck("deck.play", "A", "L1"));
+  a.fire("play");
+  a.fire("playing");
+  a.paused = true;
+  a.ended = true;
+  a.fire("pause");
+  a.fire("ended");
+  assert.deepEqual(mediaOf(facts, "L1"), ["playing", "paused:ext@end", "ended"]);
+});
+
+test("a current play interrupted by someone else is reported as aborted with its playId; the start watchdog is not left waiting", async () => {
+  const { driver, elements, facts, timers } = await setup();
+  driver.execute(load("A", "L1"));
+  const a = elements[0]!;
+  a.ready(200);
+  a.playMode = "pending";
+  driver.execute({ type: "deck.play", deck: "A", loadId: L("L1"), playId: asId<PlayRequestId>("p-current") });
+  a.pause(); // not ours: rejects the pending play() with AbortError
+  await flush();
+  const rejections = facts.filter((f) => f.event.kind === "play-rejected").map((f) => (f.event.kind === "play-rejected" ? [f.event.playId, f.event.reason] : []));
+  assert.deepEqual(rejections, [["p-current", "aborted"]]);
+  timers.advance(60_000);
+  assert.equal(facts.some((f) => f.event.kind === "error"), false, "no start timeout after the refusal was reported");
+});

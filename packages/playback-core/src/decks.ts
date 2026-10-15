@@ -51,7 +51,8 @@ export function loadDeck(
     wantPlaying: options.wantPlaying,
     playId: null,
     pausesAwaited: 0,
-    seekPendingMs: null
+    seekPendingMs: null,
+    seekEpoch: 0
   } satisfies Partial<DeckState>);
   ctx.emit({ type: "deck.load", deck: deck.id, loadId, itemId: options.itemId, media: options.media, startAtMs: options.startAtMs });
   ctx.emit({ type: "deck.gain", deck: deck.id, loadId, gain: options.gain, rampMs: 0 });
@@ -81,6 +82,7 @@ export function seekDeck(ctx: StepContext, deck: DeckState, positionMs: number):
   if (deck.loadId === null) return;
   // Without metadata the element fires no `seeked` to wait for (nothing has played yet either).
   deck.seekPendingMs = readinessAtLeast(deck.readiness, "metadata") ? positionMs : null;
+  deck.seekEpoch += 1;
   deck.clock = { positionMs, observedAt: ctx.now, rate: 0 };
   ctx.emit({ type: "deck.seek", deck: deck.id, loadId: deck.loadId, positionMs });
 }

@@ -12,7 +12,10 @@ export const DECK_IDS: readonly DeckId[] = ["A", "B"];
 /**
  * Why play() was refused. "aborted" (AbortError) answers a play that a
  * pause()/load() interrupted; an executor does not report the ones its own
- * pause()/unload caused, because they answer a request already superseded.
+ * pause()/unload or a later own play caused, because they answer a request
+ * already superseded. A reported one is final for that request like any other
+ * refusal: the executor stops waiting for it, so the core must not wait for
+ * a `playing` either.
  */
 export type PlayRejection = "not-allowed" | "aborted" | "unsupported" | "unknown";
 
@@ -41,7 +44,18 @@ export type MediaEvent =
    * effect: exactly one per effect (see deck.pause), either the DOM `pause`
    * event that answers it or, when no event is owed, one reported at once.
    * It may arrive after a later play request; it is never an interruption.
-   * false = the platform/OS/another agent paused the element.
+   * false = the platform/OS/another agent paused the element (or a natural
+   * end the element no longer shows, see atEnd) and nothing asked it to play
+   * since.
+   *
+   * A pause the executor observed before a later deck.play/voice.play of the
+   * same load (the element was paused, its `pause` event still queued, when
+   * the play request arrived) is not reported unless it answers a deck.pause:
+   * the newer request supersedes it, and that play's `playing` or
+   * `play-rejected` decides. Until such a queued pause is dispatched the
+   * executor reports no `playing`/`waiting` (they predate it). Known gap: a
+   * pause and resume by other code within one task, with nothing observing
+   * the element between them, is reported as an interruption.
    */
   | { readonly kind: "paused"; readonly positionMs: number; readonly atEnd: boolean; readonly requested: boolean }
   /**
@@ -51,6 +65,11 @@ export type MediaEvent =
    */
   | { readonly kind: "seeked"; readonly positionMs: number }
   | { readonly kind: "time"; readonly positionMs: number; readonly rate: number }
+  /**
+   * The element ended and still is ended when the event is dispatched. An
+   * `ended` queued at the end but dispatched after a seek/play moved the
+   * element off it is not reported (the core's seek fence also drops one).
+   */
   | { readonly kind: "ended" }
   /** The play() promise of the deck.play/voice.play with this playId was rejected. */
   | { readonly kind: "play-rejected"; readonly reason: PlayRejection; readonly playId: PlayRequestId }

@@ -63,17 +63,29 @@ type Watchdog = "load" | "start" | "stall" | "seek";
  * Within one load, media events are queued on the element's own task source
  * and dispatched in order. That order is what attributes them:
  *  - every paused→playing transition of the element is followed by exactly
- *    one `pause` event when it pauses again (own pause(), natural end, OS).
- *    The slot numbers those transitions (own play() calls that unpaused the
- *    element, plus `play` events it did not cause) and so knows which `pause`
- *    event, by ordinal, will answer a pause() call: the next one if the call
- *    paused the element, an earlier still-queued one if the element was
- *    already paused, none if nothing is owed (then it acknowledges at once);
- *  - a `playing`/`waiting` dispatched while such an acknowledgement is
- *    outstanding was queued before that pause and belongs to a superseded
- *    play, so it is not reported (a later play's `playing` follows the `pause`);
+ *    one `pause` event when it pauses again (own pause(), natural end, OS),
+ *    and each such transition queues one `play` event. The slot counts the
+ *    transitions it observes from `element.paused` — at every own call and
+ *    at every event it handles, so also unpauses by other code whose `play`
+ *    event is still queued — and so knows how many `pause` events are still
+ *    owed and which one, by ordinal, answers a pause() call: the next one if
+ *    the call paused the element, an earlier still-queued one if the element
+ *    was already paused, none if nothing is owed (then it acknowledges at once);
+ *  - a `playing`/`waiting` dispatched while a `pause` event is still owed was
+ *    queued before that pause and belongs to a superseded play, so it is not
+ *    reported (a later play's `playing` follows the `pause`);
+ *  - a `pause` event still owed when play() is called predates that request
+ *    (the platform, another agent or the natural end paused the element
+ *    before it was asked to play again): it is superseded, not reported as an
+ *    interruption, unless it answers a pause() call;
+ *  - an `ended` dispatched once the element is no longer ended (a seek or
+ *    play since moved it off the end) describes the old position and is not
+ *    reported; it changes nothing the slot wants;
  *  - a `seeked` dispatched while the element is seeking again answers an
  *    older target; only the latest seek is acknowledged.
+ * Not attributable: a pause and an unpause by other code in the same task,
+ * with no slot call or event between them, leave `element.paused` unchanged;
+ * that `pause` is reported as an interruption.
  * DOM events carry no request identity; only a play() promise does, so only
  * `play-rejected` names the play request (playId) it answers.
  *
@@ -101,12 +113,15 @@ export class MediaSlot {
   private seekUnanswered = false;
   private lastTimeEmit = -Infinity;
   private lastDurationMs: number | null | undefined = undefined;
-  /** Own play() calls that unpaused the element (each queues one `play` event). */
-  private ownUnpauses = 0;
-  private ownPlayEventsQueued = 0;
-  /** `play` events not caused by this slot (the platform resumed the element). */
-  private externalUnpauses = 0;
+  /** element.paused as last observed; a difference found later is a transition by other code. */
+  private lastKnownPaused = true;
+  /** paused→playing transitions observed so far, by own play() or anyone else. */
+  private unpauses = 0;
+  /** Of those, transitions whose `play` event has not been dispatched yet. */
+  private playEventsAhead = 0;
   private pauseEventsSeen = 0;
+  /** `pause` events up to this ordinal predate a later play() and are not interruptions. */
+  private supersededThrough = 0;
   /** Pause acknowledgements owed, keyed by the ordinal of the `pause` event that answers them. */
   private readonly pendingAcks = new Map<number, number>();
   private outputRunning: boolean;
@@ -140,6 +155,9 @@ export class MediaSlot {
 
   play(playId: PlayRequestId): void {
     if (this.released || this.failed) return;
+    this.observePaused();
+    // Every `pause` still owed was queued before this request: it no longer describes what is wanted.
+    this.supersededThrough = Math.max(this.supersededThrough, this.pauseTransitions());
     this.wantPlay = true;
     // Already rolling: play() would resolve without a new `playing` event, so no start watchdog.
     if (!this.element.paused && this.everPlayed) return;
@@ -169,7 +187,9 @@ export class MediaSlot {
     this.disarm("stall");
     this.heldWatchdogs.clear();
     const el = this.element;
+    this.observePaused();
     el.pause();
+    this.observePaused();
     // The `pause` event ordinal that answers this call: the one this call caused,
     // or the latest one still queued. None owed: the element is settled, acknowledge now.
     const answeredBy = this.pauseTransitions();
@@ -180,6 +200,7 @@ export class MediaSlot {
   seek(positionMs: number): void {
     if (this.released || this.failed) return;
     const target = Math.max(0, positionMs);
+    this.observePaused();
     if (this.element.readyState >= HAVE_METADATA) this.startSeek(target);
     else this.pendingSeekMs = target; // answered after loadedmetadata applies it
   }
@@ -209,7 +230,7 @@ export class MediaSlot {
     if (!this.owedPlaying) return;
     this.owedPlaying = false;
     // Only a channel that still wants to play and whose element was never paused meanwhile resumes.
-    if (!this.wantPlay || el.paused || el.ended || this.waiting || el.readyState < HAVE_FUTURE_DATA || this.pendingAcks.size > 0) return;
+    if (!this.wantPlay || el.paused || el.ended || this.waiting || el.readyState < HAVE_FUTURE_DATA || this.pauseOwed()) return;
     this.reportPlaying();
   }
 
@@ -270,9 +291,28 @@ export class MediaSlot {
     return el.playbackRate;
   }
 
+  /**
+   * Count a paused→playing transition made since the last observation (by
+   * other code, its `play` event still queued). A playing→paused one needs no
+   * bookkeeping: `pauseTransitions` reads it from element.paused directly.
+   */
+  private observePaused(): void {
+    const paused = this.element.paused;
+    if (this.lastKnownPaused && !paused) {
+      this.unpauses += 1;
+      this.playEventsAhead += 1;
+    }
+    this.lastKnownPaused = paused;
+  }
+
   /** Paused→playing transitions so far, minus the current one if the element is playing now = pause transitions. */
   private pauseTransitions(): number {
-    return this.ownUnpauses + this.externalUnpauses - (this.element.paused ? 0 : 1);
+    return this.unpauses - (this.element.paused ? 0 : 1);
+  }
+
+  /** A `pause` event is still queued: anything dispatched now was queued before it. */
+  private pauseOwed(): boolean {
+    return this.pauseTransitions() > this.pauseEventsSeen || this.pendingAcks.size > 0;
   }
 
   private refusePlay(result: Exclude<OutputReadiness, "running">, playId: PlayRequestId): void {
@@ -285,7 +325,7 @@ export class MediaSlot {
 
   private callPlay(token: number, playId: PlayRequestId): void {
     const el = this.element;
-    const wasPaused = el.paused;
+    this.observePaused();
     let pending: Promise<void> | undefined;
     try {
       pending = el.play();
@@ -293,10 +333,7 @@ export class MediaSlot {
       pending = Promise.reject(error);
     }
     // A play() refused up front (no user activation) leaves the element paused and queues nothing.
-    if (wasPaused && !el.paused) {
-      this.ownUnpauses += 1;
-      this.ownPlayEventsQueued += 1;
-    }
+    this.observePaused();
     // play() resolving is not "playing": only the `playing` event is reported as such.
     pending?.catch((error: unknown) => {
       if (token !== this.playToken || this.released || this.failed) return;
@@ -361,7 +398,9 @@ export class MediaSlot {
       el.addEventListener(
         type,
         () => {
-          if (!this.released) handler();
+          if (this.released) return;
+          this.observePaused();
+          handler();
         },
         { signal }
       );
@@ -386,12 +425,12 @@ export class MediaSlot {
       this.emitIfLive({ kind: "can-play", through: true });
     });
     on("play", () => {
-      if (this.ownPlayEventsQueued > 0) this.ownPlayEventsQueued -= 1;
-      else this.externalUnpauses += 1;
+      if (this.playEventsAhead > 0) this.playEventsAhead -= 1;
+      else this.unpauses += 1; // unpaused and paused again by other code between two observations
     });
     on("playing", () => {
-      if (this.pendingAcks.size > 0) {
-        // Queued before an own pause that has not been answered yet: it belongs to a superseded play.
+      if (this.pauseOwed()) {
+        // Queued before a pause that has not been dispatched yet: it belongs to a superseded play.
         this.options.note?.("playing.superseded", { positionMs: position() });
         return;
       }
@@ -410,7 +449,7 @@ export class MediaSlot {
       this.reportPlaying();
     });
     on("waiting", () => {
-      if (this.pendingAcks.size > 0) return; // from before an own pause, like `playing` above
+      if (this.pauseOwed()) return; // from before a queued pause, like `playing` above
       this.waiting = true;
       this.reportedPlaying = false;
       if (this.wantPlay) this.armStall();
@@ -418,11 +457,6 @@ export class MediaSlot {
     });
     on("stalled", () => this.emitIfLive({ kind: "stalled" }));
     on("pause", () => {
-      this.waiting = false;
-      this.reportedPlaying = false;
-      this.owedPlaying = false;
-      this.disarm("stall");
-      this.heldWatchdogs.delete("stall");
       const ordinal = ++this.pauseEventsSeen;
       let acks = 0;
       for (const [answeredBy, count] of this.pendingAcks) {
@@ -430,6 +464,16 @@ export class MediaSlot {
         acks += count;
         this.pendingAcks.delete(answeredBy);
       }
+      if (acks === 0 && ordinal <= this.supersededThrough) {
+        // Paused before a later play() was asked for (that play, or its refusal, is what counts now).
+        this.options.note?.("pause.superseded", { positionMs: position(), ordinal });
+        return;
+      }
+      this.waiting = false;
+      this.reportedPlaying = false;
+      this.owedPlaying = false;
+      this.disarm("stall");
+      this.heldWatchdogs.delete("stall");
       const observed = { kind: "paused", positionMs: position(), atEnd: el.ended } as const;
       if (acks === 0) return this.emitIfLive({ ...observed, requested: false });
       // One acknowledgement per pause() call this event answers.
@@ -448,6 +492,11 @@ export class MediaSlot {
       this.emitIfLive({ kind: "time", positionMs: position(), rate: this.rate() });
     });
     on("ended", () => {
+      if (!el.ended) {
+        // Queued at the end, dispatched after a seek/play moved the element off it: the old position's end.
+        this.options.note?.("ended.obsolete", { positionMs: position(), seeking: el.seeking });
+        return;
+      }
       this.wantPlay = false;
       this.waiting = false;
       this.reportedPlaying = false;

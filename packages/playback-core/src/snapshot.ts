@@ -28,7 +28,8 @@ function deckSnapshot(deck: DeckView): DeckSnapshot {
     readiness: deck.readiness,
     clock: deck.clock,
     duration: deck.duration,
-    gain: deck.gain
+    gain: deck.gain,
+    seekEpoch: deck.seekEpoch
   };
 }
 

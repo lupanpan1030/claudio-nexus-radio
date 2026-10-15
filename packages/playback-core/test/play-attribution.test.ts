@@ -111,19 +111,67 @@ test("a pause the executor acknowledges at once (nothing owed, e.g. a play still
   assert.equal(sim.state.decks.A.pausesAwaited + sim.state.decks.B.pausesAwaited, 0, "unload forgets owed acknowledgements");
 });
 
-test("an aborted play is not a block: the interruption that caused it decides", () => {
+test("a current aborted play is final and bounded: the transport pauses (not blocked) and resume asks again", () => {
   const sim = new Sim({}, { djEnabled: false });
   const [a] = sim.enqueue("a");
   sim.cmd({ type: "resume" });
   sim.resolve(a!);
+  const aLoad = sim.loadOf(a!);
   sim.rejectPlay(a!, "aborted");
-  assert.notEqual(sim.snap.transport, "blocked");
-  assert.equal(sim.snap.transport, "loading");
+  assert.equal(sim.snap.transport, "paused", "not an unbounded loading the executor no longer answers");
+  assert.equal(sim.state.blocked, false, "no gesture is known to be missing");
+  assert.equal(sim.snap.program?.started, false);
+  const mark = sim.mark();
+  const resumed = sim.cmd({ type: "resume" });
+  assert.equal(resumed.notes.some((n) => n.kind === "ignored"), false, "resume is not ignored as already playing");
+  assert.equal(sim.effects("deck.play", mark).filter((e) => e.loadId === aLoad.loadId).length, 1);
+  sim.deck(a!, { kind: "paused", positionMs: 0, atEnd: false, requested: true }); // the pause the abort caused is acknowledged
   sim.deck(a!, { kind: "playing", positionMs: 0 });
+  assert.equal(sim.snap.transport, "playing");
   assert.equal(sim.receipts().length, 1);
 });
 
-test("seek racing the natural end: the end's pause dispatched after the seek does not pause the transport", () => {
+test("a standby's current aborted preroll play cancels the preroll; a superseded aborted play is stale", () => {
+  const sim = new Sim({ preferredTalkMode: "talk-over-crossfade", crossfadeLeadMs: 8000 });
+  const [a, b] = sim.enqueue("a", "b");
+  sim.cmd({ type: "resume" });
+  sim.startProgram(a!);
+  sim.resolve(b!);
+  sim.deck(b!, { kind: "can-play", through: true });
+  sim.cueReady();
+  sim.deck(a!, { kind: "time", positionMs: 194_000, rate: 1 });
+  assert.equal(sim.snap.transition?.phase, "prerolling");
+  const bLoad = sim.loadOf(b!);
+  const stale = sim.fact({ type: "deck.media", deck: bLoad.deck, loadId: bLoad.loadId, event: { kind: "play-rejected", reason: "aborted", playId: "play-old" as never } });
+  assert.equal(stale.notes[0]?.kind, "stale");
+  assert.equal(sim.snap.transition?.phase, "prerolling");
+  sim.rejectPlay(b!, "aborted");
+  assert.notEqual(sim.snap.transition?.phase, "prerolling");
+  assert.equal(sim.snap.transport, "playing", "A keeps playing");
+});
+
+test("seek racing the natural end: the end's pause (superseded by the seek's play) never arrives, the stale ended is dropped, playback goes on", () => {
+  const sim = new Sim({}, { djEnabled: false });
+  const [a] = sim.enqueue("a", "b");
+  sim.cmd({ type: "resume" });
+  sim.startProgram(a!);
+  sim.deck(a!, { kind: "can-play", through: true });
+  sim.deck(a!, { kind: "metadata", duration: { kind: "known", ms: 200_000, source: "media-element" } });
+  const aLoad = sim.loadOf(a!).loadId;
+  const mark = sim.mark();
+  sim.cmd({ type: "seek", positionMs: 150 });
+  assert.equal(sim.effects("deck.play", mark).filter((e) => e.loadId === aLoad).length, 1, "play asked again with the seek, once");
+  const ended = sim.deck(a!, { kind: "ended" });
+  assert.equal(ended.notes[0]?.kind, "stale");
+  sim.deck(a!, { kind: "waiting", positionMs: 150 });
+  sim.deck(a!, { kind: "seeked", positionMs: 150 });
+  sim.deck(a!, { kind: "playing", positionMs: 150 });
+  assert.equal(sim.snap.transport, "playing");
+  assert.equal(sim.snap.program?.item.itemId, a);
+  assert.equal(sim.receipts().length, 1);
+});
+
+test("an unrequested pause while a seek is pending is a real interruption: the transport pauses and no play is guessed", () => {
   const sim = new Sim({}, { djEnabled: false });
   const [a] = sim.enqueue("a", "b");
   sim.cmd({ type: "resume" });
@@ -133,16 +181,27 @@ test("seek racing the natural end: the end's pause dispatched after the seek doe
   const aLoad = sim.loadOf(a!).loadId;
   const mark = sim.mark();
   sim.cmd({ type: "seek", positionMs: 100_000 });
-  assert.ok(sim.effects("deck.play", mark).some((e) => e.loadId === aLoad), "play asked again with the seek");
   sim.deck(a!, { kind: "paused", positionMs: 100_000, atEnd: false, requested: false });
-  assert.equal(sim.snap.transport, "loading", "not paused: the listener just sought");
-  assert.notEqual(sim.state.intent, "pause");
-  assert.equal(sim.effects("deck.play", mark).filter((e) => e.loadId === aLoad).length, 2);
+  assert.equal(sim.snap.transport, "paused");
+  assert.equal(sim.state.intent, "pause");
+  assert.equal(sim.effects("deck.play", mark).filter((e) => e.loadId === aLoad).length, 1, "only the seek's own play");
+  assert.ok(sim.effects("deck.pause", mark).some((e) => e.loadId === aLoad));
   sim.deck(a!, { kind: "seeked", positionMs: 100_000 });
-  sim.deck(a!, { kind: "playing", positionMs: 100_000 });
-  assert.equal(sim.snap.transport, "playing");
-  assert.equal(sim.snap.program?.item.itemId, a);
-  assert.equal(sim.receipts().length, 1);
+  assert.equal(sim.snap.transport, "paused");
+});
+
+test("seek re-asks play only while playback is wanted: a paused transport's seek issues no deck.play", () => {
+  const sim = new Sim({}, { djEnabled: false });
+  const [a] = sim.enqueue("a");
+  sim.cmd({ type: "resume" });
+  sim.startProgram(a!);
+  sim.deck(a!, { kind: "metadata", duration: { kind: "known", ms: 200_000, source: "media-element" } });
+  sim.cmd({ type: "pause" });
+  sim.deck(a!, { kind: "paused", positionMs: 1_000, atEnd: false, requested: true });
+  const mark = sim.mark();
+  sim.cmd({ type: "seek", positionMs: 50_000 });
+  assert.equal(sim.effects("deck.play", mark).length, 0);
+  assert.equal(sim.effects("deck.seek", mark).length, 1);
 });
 
 test("seek after the end's pause but before its ended: the stale ended is dropped and play is requested", () => {

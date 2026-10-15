@@ -44,6 +44,16 @@ export interface DeckSnapshot {
   readonly duration: DurationInfo;
   /** Transition multiplier currently targeted (not the user volume). */
   readonly gain: number;
+  /**
+   * Position discontinuities of this load: 0 when loaded (startAtMs is the
+   * load's own start), +1 for every seek the core issued on it (listener
+   * seek, a standby held back to its start), whether or not its `seeked`
+   * arrived yet; `clock` already holds the target. A clock follower re-anchors
+   * whenever (loadId, seekEpoch) changes, also for a tiny or backward seek,
+   * instead of guessing from position deltas. A new loadId is a discontinuity
+   * by identity; the epoch restarts at 0 there and is never compared across loads.
+   */
+  readonly seekEpoch: number;
 }
 
 /**

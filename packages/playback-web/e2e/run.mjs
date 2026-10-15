@@ -499,6 +499,112 @@ const scenarios = {
     const pcm = analyzePcm(await t.capture("remount-resumed", 0.4));
     assert.ok(pcm.amplitude[440] > 0.17);
     return { old, quiet, pcm };
+  },
+
+  // The platform stops rendering the shared output (AudioContext suspend; not a physical OS interruption) and resumes it.
+  async "output-suspend-resume"(t) {
+    await t.boot({ catalog: CATALOG, djEnabled: false });
+    await t.dispatch(enqueue("a12"));
+    await t.click([{ type: "resume" }]);
+    await t.waitProgramPlaying("a12");
+    await sleep(400);
+    const before = analyzePcm(await t.capture("before-suspend", 0.4));
+    assert.ok(before.amplitude[440] > 0.17, `A audible before: ${JSON.stringify(before.amplitude)}`);
+    const deck = (await t.view()).snapshot.program.deck;
+    const mark = (await t.events()).length;
+    assert.equal(await t.page.evaluate(() => window.e2e.otherOutput(false)), "suspended");
+    await t.waitTransport("waiting", 3_000);
+    const held1 = await t.clock();
+    await sleep(500);
+    const held2 = await t.clock();
+    assert.equal(held2.decks[deck].rate, 0, "rate 0 while nothing renders");
+    assert.equal(held2.decks[deck].positionMs, held1.decks[deck].positionMs, "clock frozen while suspended");
+    assert.equal(await t.page.evaluate(() => window.e2e.otherOutput(true)), "running");
+    await t.waitProgramPlaying("a12", 5_000);
+    await sleep(300);
+    const after = analyzePcm(await t.capture("after-resume", 0.4));
+    assert.ok(after.amplitude[440] > 0.17, `A audible after resume: ${JSON.stringify(after.amplitude)}`);
+    const moved = await t.clock();
+    assert.ok(moved.decks[deck].positionMs > held2.decks[deck].positionMs + 200, "media clock runs again");
+    const events = (await t.events()).slice(mark);
+    const kinds = events.filter((e) => isFact(e, "deck.media")).map((e) => e.data.event.kind).filter((k) => k !== "time");
+    assert.deepEqual(kinds.slice(0, 2), ["waiting", "playing"], `facts across the suspension: ${kinds}`);
+    assert.equal(events.filter((e) => isFact(e, "deck.media", "error")).length, 0, "a frozen output is no stall/start timeout");
+    assert.equal(events.filter((e) => e.kind === "effect" && e.data.type === "receipt.report").length, 0, "no second receipt");
+    return { before, after, factKinds: kinds };
+  },
+
+  // Another agent pauses the element and, before its queued `pause` is dispatched, the listener seeks.
+  async "external-pause-then-seek"(t) {
+    await t.boot({ catalog: CATALOG, djEnabled: false });
+    await t.dispatch(enqueue("a12", "b12"));
+    await t.click([{ type: "resume" }]);
+    await t.waitProgramPlaying("a12");
+    await sleep(800);
+    const mark = (await t.events()).length;
+    await t.page.evaluate(() => window.e2e.otherPause("a12.wav", { type: "seek", positionMs: 6_000 }));
+    await sleep(800);
+    await t.waitProgramPlaying("a12", 5_000);
+    const seekEvents = (await t.events()).slice(mark);
+    const loadId = (await t.view()).snapshot.program.loadId;
+    const pauses = seekEvents.filter((e) => isFact(e, "deck.media", "paused", (d) => d.loadId === loadId));
+    assert.deepEqual(pauses.map((e) => e.data.event.requested), [], "the superseded pause is no fact");
+    assert.ok(seekEvents.some((e) => e.kind === "driver.pause.superseded"), "the driver saw and superseded the queued pause");
+    assert.equal(seekEvents.some((e) => e.kind === "note" && /external pause/.test(String(e.data?.reason))), false, "transport not paused");
+    const clock = await t.clock();
+    const position = clock.decks[(await t.view()).snapshot.program.deck].positionMs;
+    assert.ok(position > 6_300 && position < 8_500, `played on from the seek target: ${position}`);
+    const sought = analyzePcm(await t.capture("after-seek", 0.4));
+    assert.ok(sought.amplitude[440] > 0.17);
+
+    // Without a later request the same external pause is respected: the transport pauses.
+    const mark2 = (await t.events()).length;
+    await t.page.evaluate(() => window.e2e.otherPause("a12.wav"));
+    await t.waitTransport("paused", 3_000);
+    const real = (await t.events()).slice(mark2).filter((e) => isFact(e, "deck.media", "paused"));
+    // The interruption, then the acknowledgement of the transport pause it caused (nothing owed: answered at once).
+    assert.deepEqual(real.map((e) => e.data.event.requested), [false, true], "one unrequested pause, then the core's own pause acknowledged");
+    await sleep(300); // the element's already-decoded tail drains through the graph
+    const silent = analyzePcm(await t.capture("external-paused", 0.4));
+    assert.ok(silent.rms < 0.002, `silent: ${silent.rms}`);
+    await t.click([{ type: "resume" }]);
+    await t.waitProgramPlaying("a12", 5_000);
+    const view = await t.view();
+    assert.deepEqual(view.snapshot.receipts.map((r) => r.itemId), [view.snapshot.program.item.itemId], "one receipt (A); B never started");
+    return { position, sought, silent };
+  },
+
+  // The listener seeks back inside the natural end's timeupdate (paused/ended already set, pause/ended queued); then the output suspends and resumes.
+  async "end-seek-race-then-output-resume"(t) {
+    await t.boot({ catalog: CATALOG, djEnabled: false });
+    await t.dispatch(enqueue("a3", "b12"));
+    await t.click([{ type: "resume" }]);
+    await t.waitProgramPlaying("a3");
+    await t.dispatch({ type: "seek", positionMs: 2_500 });
+    await t.page.evaluate(() => window.e2e.atEnd("a3.wav", { type: "seek", positionMs: 150 }));
+    await t.waitEvent("seek inside the end window", `e.kind === "other.at-end.after"`, 5_000);
+    const events = await t.events();
+    const at = find(events, (e) => e.kind === "other.at-end", "at-end");
+    const after = find(events, (e) => e.kind === "other.at-end.after", "at-end.after");
+    assert.deepEqual([at.data.paused, at.data.ended], [true, true], "the window was hit: element paused and ended, events queued");
+    assert.deepEqual([after.data.ended, after.data.seeking], [false, true]);
+    await t.waitProgramPlaying("a3", 5_000);
+    const window1 = (await t.events()).slice(events.indexOf(at));
+    assert.ok(window1.some((e) => e.kind === "driver.ended.obsolete"), "the queued ended was recognised as obsolete");
+    assert.equal(window1.some((e) => isFact(e, "deck.media", "ended")), false);
+    assert.equal(window1.some((e) => isFact(e, "deck.media", "paused")), false, "the end's pause was superseded by the seek's play");
+    await sleep(300);
+    assert.equal(await t.page.evaluate(() => window.e2e.otherOutput(false)), "suspended");
+    await t.waitTransport("waiting", 3_000);
+    assert.equal(await t.page.evaluate(() => window.e2e.otherOutput(true)), "running");
+    await t.waitProgramPlaying("a3", 3_000);
+    await sleep(250);
+    const pcm = analyzePcm(await t.capture("after-resume", 0.4));
+    assert.ok(pcm.amplitude[440] > 0.17, `A still sounds: ${JSON.stringify(pcm.amplitude)}`);
+    const view = await t.view();
+    assert.equal(view.snapshot.program.item.track.mediaId, "a3", "the obsolete end did not advance to B");
+    assert.equal(view.snapshot.receipts.length, 1);
+    return { at: at.data, after: after.data, pcm };
   }
 };
 
