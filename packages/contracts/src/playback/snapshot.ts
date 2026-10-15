@@ -90,6 +90,11 @@ export interface VoiceSnapshot {
   readonly voiceLoadId: VoiceLoadId | null;
   readonly clock: MediaClockSample | null;
   readonly scriptText: string | null;
+  /**
+   * The script's subtitle; with a measured voice duration usually projected
+   * to "estimated" sentence timing on the voice clock (positionMs, rate 1).
+   * Same track for owner and observers; the asset itself stays plain text.
+   */
   readonly subtitle: SubtitleTrack | null;
 }
 
@@ -121,6 +126,7 @@ export interface RetainedNarrationView {
   readonly cueId: CueId;
   readonly transitionId: TransitionId;
   readonly scriptText: string;
+  /** As VoiceSnapshot.subtitle: a replay shows the same (possibly estimated) times as the original speech. */
   readonly subtitle: SubtitleTrack;
   /** Spoken length in ms at the asset's playback rate; null when not measured. */
   readonly spokenMs: number | null;

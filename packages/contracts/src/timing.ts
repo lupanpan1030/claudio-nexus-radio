@@ -3,6 +3,8 @@ import { literal, number, object, tagged, type Decoder } from "./validation.js";
 /**
  * Where a text timeline came from. Consumers must not upgrade a weaker
  * provenance (e.g. render "estimated" as if it were word-accurate).
+ * "estimated": times derived from text and a measured media length, not from
+ * the media itself; deriving them from plain text is what this tier means.
  */
 export type TimingProvenance = "native-word" | "native-line" | "estimated" | "plain-text";
 

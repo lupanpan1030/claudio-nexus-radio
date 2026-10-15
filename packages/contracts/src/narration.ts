@@ -12,6 +12,10 @@ export interface SubtitleSegment {
 /**
  * DJ subtitle timeline. Without trustworthy sentence boundaries this is one
  * "plain-text" segment holding the whole script; never fabricated per-char timing.
+ * The server always stores plain text (the script exists before any audio).
+ * An executor snapshot may show it as "estimated": sentences spread over the
+ * voice's measured duration at rate 1 by text length. That is a labelled
+ * guess, not an alignment, and the stored asset is never rewritten.
  */
 export interface SubtitleTrack {
   readonly timing: TimingProvenance;

@@ -1,4 +1,5 @@
 import type {
+  CueAsset,
   DeckId,
   DeckSnapshot,
   DisplayItem,
@@ -7,12 +8,19 @@ import type {
   PlaybackSnapshot,
   QueueItemId,
   ResolvedMedia,
+  SubtitleTrack,
   TransportStatus,
   VoiceSnapshot
 } from "@claudio/contracts";
 import { spokenDurationMs } from "@claudio/contracts";
 import type { PlaybackState } from "./state.js";
+import { projectedSubtitle } from "./subtitle-estimate.js";
 import { narrationReplayBlock } from "./voice.js";
+
+/** Subtitle shown for an asset: estimated sentence timing when enabled, the stored track otherwise (the asset is never edited). */
+function subtitleOf(state: PlaybackState, asset: CueAsset): SubtitleTrack {
+  return state.config.estimateNarrationTiming ? projectedSubtitle(asset) : asset.script.subtitle;
+}
 
 type DeckView = PlaybackState["decks"][DeckId];
 
@@ -73,7 +81,7 @@ function displayOf(state: PlaybackState): DisplayItem {
       kind: "voice",
       cueId: cue.binding.cueId,
       transitionId: cue.binding.transitionId,
-      subtitle: cue.asset?.script.subtitle ?? null,
+      subtitle: cue.asset ? subtitleOf(state, cue.asset) : null,
       text: cue.asset?.script.text ?? null
     };
   }
@@ -103,7 +111,7 @@ function voiceOf(state: PlaybackState): VoiceSnapshot | null {
     voiceLoadId: cue.voiceLoadId,
     clock: cue.clock,
     scriptText: cue.asset?.script.text ?? null,
-    subtitle: cue.asset?.script.subtitle ?? null
+    subtitle: cue.asset ? subtitleOf(state, cue.asset) : null
   };
 }
 
@@ -117,7 +125,7 @@ function narrationOf(state: PlaybackState, now: number): NarrationSnapshot {
           cueId: retained.binding.cueId,
           transitionId: retained.binding.transitionId,
           scriptText: retained.asset.script.text,
-          subtitle: retained.asset.script.subtitle,
+          subtitle: subtitleOf(state, retained.asset),
           spokenMs: spokenDurationMs(retained.asset.voice),
           expiresAt: retained.asset.voice.stream.expiresAt
         }

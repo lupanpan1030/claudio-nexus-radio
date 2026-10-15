@@ -57,6 +57,12 @@ export interface CoreConfig {
   readonly maxRefreshAttempts: number;
   readonly historyLimit: number;
   readonly receiptLimit: number;
+  /**
+   * Snapshot DJ subtitles as "estimated" sentence timing spread over the
+   * voice's measured duration (see subtitle-estimate.ts). A length-based
+   * guess, not an alignment; off keeps the server's plain text as is.
+   */
+  readonly estimateNarrationTiming: boolean;
 }
 
 /**
@@ -74,7 +80,8 @@ export const DEFAULT_CORE_CONFIG: CoreConfig = Object.freeze({
   maxConsecutiveFailures: 3,
   maxRefreshAttempts: 1,
   historyLimit: 100,
-  receiptLimit: 500
+  receiptLimit: 500,
+  estimateNarrationTiming: true
 });
 
 export interface QueueEntry {
@@ -311,7 +318,7 @@ export function createInitialState(options: {
   return deepFreeze(state);
 }
 
-const CONFIG_RANGES: Readonly<Record<Exclude<keyof CoreConfig, "preferredTalkMode">, readonly [min: number, max: number, integer: boolean]>> = {
+const CONFIG_RANGES: Readonly<Record<Exclude<keyof CoreConfig, "preferredTalkMode" | "estimateNarrationTiming">, readonly [min: number, max: number, integer: boolean]>> = {
   crossfadeLeadMs: [0, Infinity, false],
   duckGain: [0, 1, false],
   underVoiceGain: [0, 1, false],
@@ -330,6 +337,9 @@ function resolveConfig(overrides: Partial<CoreConfig>): CoreConfig {
   const config: CoreConfig = { ...DEFAULT_CORE_CONFIG, ...overrides, minCrossfadeTailMs: overrides.minCrossfadeTailMs ?? fadeMs };
   if (config.preferredTalkMode !== "sequential-talk" && config.preferredTalkMode !== "talk-over-crossfade") {
     throw new RangeError(`invalid core config preferredTalkMode: ${String(config.preferredTalkMode)}`);
+  }
+  if (typeof config.estimateNarrationTiming !== "boolean") {
+    throw new RangeError(`invalid core config estimateNarrationTiming: ${String(config.estimateNarrationTiming)}`);
   }
   for (const [key, [min, max, integer]] of Object.entries(CONFIG_RANGES)) {
     const value = config[key as keyof typeof CONFIG_RANGES];
