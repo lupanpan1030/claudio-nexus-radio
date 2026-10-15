@@ -1,4 +1,4 @@
-import { asId, type ExecutorInstanceId, type PlaybackCommand, type PlaybackSnapshot } from "@claudio/contracts";
+import { PLAYBACK_OPERATION_BUDGETS, asId, type ExecutorInstanceId, type PlaybackCommand, type PlaybackSnapshot } from "@claudio/contracts";
 import { createSequentialIds, withReservations } from "@claudio/playback-core";
 import {
   createBrowserDriver,
@@ -134,12 +134,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
       try {
         const catalog = await withDeadline(options.loadCatalog, shutdown.signal, options.catalogTimeoutMs ?? 8000);
         ensureLive();
-        legacyImport = importLegacyQueue(
-          options.storage,
-          queueStore,
-          (songId) => catalog.legacyLookup(songId),
-          () => new Date().toISOString()
-        );
+        legacyImport = importLegacyQueue(options.storage, (songId) => catalog.legacyLookup(songId), () => new Date().toISOString());
       } catch (error) {
         ensureLive();
         legacyImport = { status: "failed", reason: error instanceof Error ? error.message : String(error) };
@@ -157,6 +152,8 @@ export function createPlaybackSession(options: PlaybackSessionOptions): Playback
         ids,
         log,
         queueStore,
+        // Guards only: the server settles every stage within the same shared budget first.
+        deadlines: PLAYBACK_OPERATION_BUDGETS,
         initialSettings: { musicVolume: settings.musicVolume, djEnabled: settings.djEnabled },
         ports: {
           prepare,

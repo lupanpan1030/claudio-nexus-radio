@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { asId, type AssetId, type PlaybackSnapshot, type QueueEntryRequest, type QueueItemId, type RecordingId, type SourceRevision } from "@claudio/contracts";
-import type { QueueStore } from "@claudio/playback-web";
+import { asId, type AssetId, type PlaybackSnapshot, type QueueItemId, type RecordingId, type SourceRevision } from "@claudio/contracts";
 import { CatalogIndex } from "./catalog";
 import { planChatReply, shouldDeliver } from "./chat-intent";
-import { LEGACY_BACKUP_KEY, LEGACY_IMPORT_MARK_KEY, LEGACY_QUEUE_KEY, LEGACY_PLAYLIST_KEY, QUEUE_KEY, importLegacyQueue, readSettings, safeStorage } from "./persistence";
+import { LEGACY_BACKUP_KEY, LEGACY_IMPORT_MARK_KEY, LEGACY_QUEUE_KEY, LEGACY_PLAYLIST_KEY, createQueueStore, importLegacyQueue, readSettings, safeStorage } from "./persistence";
 import { voiceControls } from "./voice-model";
 import { activeLyricIndex, activeSegmentIndex, lyricsStatusText, subtitleLines } from "./subtitles";
 import { ref } from "./test-support";
@@ -76,38 +75,27 @@ class MemoryStorage {
   }
 }
 
-function memoryQueueStore(storage: MemoryStorage): QueueStore & { saved: QueueEntryRequest[][] } {
-  const saved: QueueEntryRequest[][] = [];
-  return {
-    saved,
-    load: () => saved.at(-1) ?? [],
-    save(entries) {
-      saved.push([...entries]);
-      storage.setItem(QUEUE_KEY, JSON.stringify({ version: 1, entries }));
-    }
-  };
-}
-
 test("legacy import: backs up both old keys, maps known songs, skips unknown, runs once, never edits old keys", () => {
   const storage = new MemoryStorage();
   const oldQueue = JSON.stringify([{ songId: "song-a", djLine: "x" }, { songId: "song-gone" }, { songId: "song-b" }]);
   const oldPlaylist = JSON.stringify({ playlistId: "p", picks: [] });
   storage.setItem(LEGACY_QUEUE_KEY, oldQueue);
   storage.setItem(LEGACY_PLAYLIST_KEY, oldPlaylist);
-  const store = memoryQueueStore(storage);
+  const store = createQueueStore(storage);
   const lookup = (songId: string) => catalog.legacyLookup(songId);
-  const result = importLegacyQueue(storage, store, lookup, () => "2026-10-16T00:00:00.000Z");
+  const result = importLegacyQueue(storage, lookup, () => "2026-10-16T00:00:00.000Z");
   assert.deepEqual(result, { status: "imported", imported: 2, skipped: ["song-gone"] });
-  assert.deepEqual(store.saved[0]?.map((entry) => entry.track.mediaId), ["A", "B"]);
-  assert.ok(store.saved[0]?.every((entry) => entry.origin === "restore"));
+  assert.deepEqual(store.load().map((entry) => entry.track.mediaId), ["A", "B"]);
+  assert.ok(store.load().every((entry) => entry.origin === "restore"));
   const backup = JSON.parse(storage.getItem(LEGACY_BACKUP_KEY) ?? "{}");
   assert.equal(backup.keys[LEGACY_QUEUE_KEY], oldQueue);
   assert.equal(backup.keys[LEGACY_PLAYLIST_KEY], oldPlaylist);
   assert.equal(storage.getItem(LEGACY_QUEUE_KEY), oldQueue, "old key untouched");
   assert.ok(storage.getItem(LEGACY_IMPORT_MARK_KEY));
-  storage.map.delete(QUEUE_KEY);
-  assert.deepEqual(importLegacyQueue(storage, store, lookup, () => "later"), { status: "not-needed", reason: "already-imported" });
-  assert.equal(store.saved.length, 1);
+  // The listener cleared the queue afterwards: the import does not come back.
+  store.save([]);
+  assert.deepEqual(importLegacyQueue(storage, lookup, () => "later"), { status: "not-needed", reason: "already-imported" });
+  assert.deepEqual(store.load(), []);
 });
 
 test("broken storage never throws into playback; bad settings fall back to defaults", () => {

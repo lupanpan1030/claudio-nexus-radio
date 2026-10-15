@@ -3,12 +3,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { QueueEntryRequest } from "@claudio/contracts";
-import { createStorageQueueStore } from "@claudio/playback-web";
 import { toLibraryResponse } from "../../server/track-dto";
 import type { LegacyRefRule } from "../../server/track-dto";
 import type { TrackRecord } from "../../server/types";
 import { CatalogIndex } from "./catalog";
-import { LEGACY_BACKUP_KEY, LEGACY_IMPORT_MARK_KEY, LEGACY_PLAYLIST_KEY, LEGACY_QUEUE_KEY, QUEUE_KEY, importLegacyQueue } from "./persistence";
+import { LEGACY_BACKUP_KEY, LEGACY_IMPORT_MARK_KEY, LEGACY_PLAYLIST_KEY, LEGACY_QUEUE_KEY, QUEUE_KEY, createQueueStore, importLegacyQueue } from "./persistence";
 
 function record(id: string, source: string, title: string): TrackRecord {
   return { id, title, artist: "测试歌手", album: "", extension: ".mp3", source, playable: true, filePath: `/private/${id}.mp3`, folder: "private", duration: null, addedAt: "2026-01-01T00:00:00.000Z" } as unknown as TrackRecord;
@@ -48,10 +47,10 @@ function legacyUser() {
   const storage = new MemoryStorage();
   storage.setItem(LEGACY_QUEUE_KEY, OLD_QUEUE);
   storage.setItem(LEGACY_PLAYLIST_KEY, JSON.stringify({ playlistId: "p", picks: [] }));
-  return { storage, store: createStorageQueueStore(storage, QUEUE_KEY) };
+  return { storage, store: createQueueStore(storage) };
 }
 
-const runImport = (user: ReturnType<typeof legacyUser>, catalog: CatalogIndex) => importLegacyQueue(user.storage, user.store, (id) => catalog.legacyLookup(id), () => "2026-10-16T00:00:00.000Z");
+const runImport = (user: ReturnType<typeof legacyUser>, catalog: CatalogIndex) => importLegacyQueue(user.storage, (id) => catalog.legacyLookup(id), () => "2026-10-16T00:00:00.000Z");
 
 test("the real server DTO: legacy rows lack ref, v1 rows state ref or null; no private fields leak", () => {
   const legacy = libraryBody(false);
@@ -104,18 +103,87 @@ test("storage failures never mark an import done without its entries, nor append
   const saveFails = legacyUser();
   saveFails.storage.failWrites = (key) => key === QUEUE_KEY;
   assert.equal(runImport(saveFails, catalogFrom(libraryBody(true))).status, "deferred");
-  assert.notEqual(JSON.parse(saveFails.storage.getItem(LEGACY_IMPORT_MARK_KEY) ?? "{}").status, "complete", "mark withdrawn");
+  assert.equal(saveFails.storage.getItem(LEGACY_IMPORT_MARK_KEY), null, "nothing claims the import");
   saveFails.storage.failWrites = null;
   assert.equal(runImport(saveFails, catalogFrom(libraryBody(true))).status, "imported");
   assert.equal(saveFails.store.load().length, 2);
 
+  // The mark key is only a copy: losing it neither undoes nor repeats the import.
   const markFails = legacyUser();
   markFails.storage.failWrites = (key) => key === LEGACY_IMPORT_MARK_KEY;
-  assert.equal(runImport(markFails, catalogFrom(libraryBody(true))).status, "deferred");
-  assert.equal(markFails.store.load().length, 0, "entries are saved only after the mark sticks");
+  assert.equal(runImport(markFails, catalogFrom(libraryBody(true))).status, "imported");
+  assert.equal(markFails.store.load().length, 2);
+  markFails.storage.failWrites = null;
+  assert.deepEqual(runImport(markFails, catalogFrom(libraryBody(true))), { status: "not-needed", reason: "already-imported" });
+  assert.equal(markFails.store.load().length, 2);
 
   const unreadable = legacyUser();
   unreadable.storage.setItem(QUEUE_KEY, "{broken");
   assert.equal(runImport(unreadable, catalogFrom(libraryBody(true))).status, "deferred");
   assert.equal(unreadable.storage.getItem(QUEUE_KEY), "{broken", "an unreadable new queue is never overwritten");
+});
+
+/** Raised by the storage below to model the page/process ending at one write boundary. */
+class Terminated extends Error {}
+
+/**
+ * Persisted keys only; `crashAt` ends the "process" at one write boundary:
+ * before write n (that write never lands) or after it (it landed, nothing
+ * after it runs). No in-memory state survives into the next session.
+ */
+class CrashingStorage extends MemoryStorage {
+  writes = 0;
+  crashAt: { readonly write: number; readonly when: "before" | "after" } | null = null;
+  override setItem(key: string, value: string) {
+    this.writes += 1;
+    if (this.crashAt?.write === this.writes && this.crashAt.when === "before") throw new Terminated();
+    super.setItem(key, value);
+    if (this.crashAt?.write === this.writes && this.crashAt.when === "after") throw new Terminated();
+  }
+}
+
+test("interrupted at any write boundary, the next session imports exactly the missing entries once (repeats and the newer queue kept)", () => {
+  const library = [record("song-a", "kugou-api", "晴天"), record("song-b", "main", "后来")];
+  const catalog = catalogFrom(libraryBody(true, library));
+  const oldQueue = JSON.stringify([{ songId: "song-a" }, { songId: "song-b" }, { songId: "song-a" }]);
+  const newer: QueueEntryRequest = { track: { providerId: "kugou", mediaId: "song-a" } as QueueEntryRequest["track"], display: null, origin: "radio" };
+  const expected = ["radio:song-a", "restore:song-a", "restore:song-b", "restore:song-a"];
+  const seed = () => {
+    const storage = new CrashingStorage();
+    storage.setItem(LEGACY_QUEUE_KEY, oldQueue);
+    createQueueStore(storage).save([newer]);
+    storage.writes = 0;
+    return storage;
+  };
+  const session = (storage: CrashingStorage) => importLegacyQueue(storage, (id) => catalog.legacyLookup(id), () => "2026-10-16T00:00:00.000Z");
+
+  const clean = seed();
+  assert.equal(session(clean).status, "imported");
+  const totalWrites = clean.writes;
+  assert.ok(totalWrites >= 3, `backup, queue commit and mark copy (${totalWrites} writes)`);
+
+  const outcomes: string[] = [];
+  for (let write = 1; write <= totalWrites; write += 1) {
+    for (const when of ["before", "after"] as const) {
+      const storage = seed();
+      storage.crashAt = { write, when };
+      assert.throws(() => session(storage), Terminated, `crash ${when} write ${write}`);
+      storage.crashAt = null;
+      // New session: only what reached storage.
+      const restarted = session(storage);
+      const queue = createQueueStore(storage).load().map((entry) => `${entry.origin}:${entry.track.mediaId}`);
+      assert.deepEqual(queue, expected, `crash ${when} write ${write}: every old entry once, after the newer queue`);
+      outcomes.push(`${when}#${write}:${restarted.status}`);
+      // A third start and later runtime saves (including clearing the queue) keep it imported.
+      assert.deepEqual(session(storage), { status: "not-needed", reason: "already-imported" });
+      createQueueStore(storage).save([]);
+      storage.map.delete(LEGACY_IMPORT_MARK_KEY);
+      assert.deepEqual(session(storage), { status: "not-needed", reason: "already-imported" }, "the stamp travels with every queue save");
+      assert.deepEqual(createQueueStore(storage).load(), []);
+      assert.equal(storage.getItem(LEGACY_QUEUE_KEY), oldQueue, "old key never edited");
+      assert.equal(JSON.parse(storage.getItem(LEGACY_BACKUP_KEY) ?? "{}").keys[LEGACY_QUEUE_KEY], oldQueue, "backup holds the original raw value");
+    }
+  }
+  // The commit is a single write: crashing before it re-imports, after it does not.
+  assert.ok(outcomes.includes("before#2:imported") && outcomes.includes("after#2:not-needed"), outcomes.join(" "));
 });

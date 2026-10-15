@@ -38,8 +38,29 @@ export function safeStorage(resolve: () => KeyValueStorage | null, onError: (err
   };
 }
 
+/**
+ * The executor's queue store. It writes the package's versioned envelope and
+ * carries one extra field through every save: the legacy import stamp, which
+ * the import commits in the same single write as the imported entries (see
+ * importLegacyQueue). The package decoder ignores the extra field.
+ */
 export function createQueueStore(storage: KeyValueStorage): QueueStore {
-  return createStorageQueueStore(storage, QUEUE_KEY);
+  const inner = createStorageQueueStore(storage, QUEUE_KEY);
+  return {
+    load: () => inner.load(),
+    save(entries) {
+      const stamp = readStamp(storage.getItem(QUEUE_KEY));
+      storage.setItem(QUEUE_KEY, encodeQueue(entries, stamp));
+    }
+  };
+}
+
+/** The package's own envelope for `entries`, with the import stamp added when there is one. */
+function encodeQueue(entries: readonly QueueEntryRequest[], stamp: ImportStamp | null): string {
+  let encoded = "";
+  createStorageQueueStore({ getItem: () => null, setItem: (_key, value) => void (encoded = value) }, QUEUE_KEY).save(entries);
+  if (stamp === null) return encoded;
+  return JSON.stringify({ ...(JSON.parse(encoded) as Record<string, unknown>), [STAMP_FIELD]: stamp });
 }
 
 export type LegacyImportResult =
@@ -70,27 +91,49 @@ export type LegacyLookup = (songId: string) => LegacyLookupResult;
 /** Same bound the versioned queue store decodes; a longer list would not load at all. */
 const MAX_STORED_QUEUE = 500;
 
-interface ImportMark {
-  readonly complete: boolean;
+/** Field of the queue envelope that records a finished import. */
+const STAMP_FIELD = "legacyImport";
+
+interface ImportStamp {
+  readonly version: 3;
+  readonly status: "complete";
+  readonly importedAt: string;
+  readonly imported: number;
+  readonly skipped: readonly string[];
+}
+
+function readStamp(raw: string | null): ImportStamp | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || !isRecord(parsed[STAMP_FIELD])) return null;
+    const stamp = parsed[STAMP_FIELD];
+    return stamp.version === 3 && stamp.status === "complete" ? (stamp as unknown as ImportStamp) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * A version 2 mark is final only with status "complete". A version 1 mark
- * that imported nothing but skipped songs came from a client that could not
- * map ids at all; it is not a finished import and is retried.
+ * Whether the separate mark key records a finished import:
+ * - version 3 is the copy written after a stamped queue write;
+ * - version 2 "complete" came from an unreleased build that wrote it before
+ *   the queue; it cannot be checked afterwards and is taken as final;
+ * - a version 1 mark that imported nothing but skipped songs came from a
+ *   client that could not map ids at all; it is not a finished import.
  */
-function readMark(raw: string | null): ImportMark | null {
-  if (raw === null) return null;
+function markComplete(raw: string | null): boolean {
+  if (raw === null) return false;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { complete: true };
+    return true;
   }
-  if (!isRecord(parsed)) return { complete: true };
-  if (parsed.version === 2) return { complete: parsed.status === "complete" };
-  if (parsed.version === 1 && parsed.imported === 0 && Array.isArray(parsed.skipped) && parsed.skipped.length > 0) return { complete: false };
-  return { complete: true };
+  if (!isRecord(parsed)) return true;
+  if (parsed.version === 3 || parsed.version === 2) return parsed.status === "complete";
+  if (parsed.version === 1 && parsed.imported === 0 && Array.isArray(parsed.skipped) && parsed.skipped.length > 0) return false;
+  return true;
 }
 
 /** Entries already in the new store, or null when its stored value is present but unreadable (never overwritten). */
@@ -118,15 +161,18 @@ function currentEntries(storage: KeyValueStorage, store: QueueStore): readonly Q
  * Songs the server lists without any provider, or no longer has, are skipped
  * and reported. Imported entries are appended after whatever the new store
  * already holds (e.g. radio picks made while the import waited), so a late
- * import never drops either queue.
+ * import never drops either queue. Repeated songs stay repeated.
  *
- * Exactly once: the finished mark is written and read back before the
- * entries are saved, so a repeated run can never append them twice; if the
- * save does not stick, the mark is withdrawn again.
+ * Commit point: one storage write holds both the combined queue and the
+ * import stamp, so an interruption before it leaves nothing done (the next
+ * start imports) and after it leaves everything done (the next start sees
+ * the stamp). Every later queue save keeps the stamp. The mark key is only a
+ * copy written afterwards; losing it changes nothing.
  */
-export function importLegacyQueue(storage: KeyValueStorage, store: QueueStore, lookup: LegacyLookup, nowIso: () => string): LegacyImportResult {
-  const previousMark = storage.getItem(LEGACY_IMPORT_MARK_KEY);
-  if (readMark(previousMark)?.complete) return { status: "not-needed", reason: "already-imported" };
+export function importLegacyQueue(storage: KeyValueStorage, lookup: LegacyLookup, nowIso: () => string): LegacyImportResult {
+  if (readStamp(storage.getItem(QUEUE_KEY)) !== null || markComplete(storage.getItem(LEGACY_IMPORT_MARK_KEY))) {
+    return { status: "not-needed", reason: "already-imported" };
+  }
   const rawQueue = storage.getItem(LEGACY_QUEUE_KEY);
   const rawPlaylist = storage.getItem(LEGACY_PLAYLIST_KEY);
   if (rawQueue === null && rawPlaylist === null) return { status: "not-needed", reason: "no-legacy-data" };
@@ -168,24 +214,18 @@ export function importLegacyQueue(storage: KeyValueStorage, store: QueueStore, l
   }
   if (pending.length > 0) return { status: "deferred", reason: "mapping-unavailable", pending };
 
-  const existing = currentEntries(storage, store);
+  const existing = currentEntries(storage, createQueueStore(storage));
   if (existing === null) return { status: "deferred", reason: "queue-unreadable", pending: [] };
   const room = Math.max(0, MAX_STORED_QUEUE - existing.length);
   const accepted = entries.slice(0, room);
   if (accepted.length < entries.length) skipped.push(`(queue full: ${entries.length - accepted.length} more)`);
 
-  const mark = JSON.stringify({ version: 2, status: "complete", importedAt: nowIso(), imported: accepted.length, skipped });
-  storage.setItem(LEGACY_IMPORT_MARK_KEY, mark);
-  if (storage.getItem(LEGACY_IMPORT_MARK_KEY) !== mark) return { status: "deferred", reason: "storage-failed", pending: [] };
-  if (accepted.length > 0) {
-    store.save([...existing, ...accepted]);
-    if (store.load().length !== existing.length + accepted.length) {
-      // The save did not stick: withdraw the mark so the next start can try again.
-      if (previousMark === null) storage.setItem(LEGACY_IMPORT_MARK_KEY, JSON.stringify({ version: 2, status: "retry", at: nowIso() }));
-      else storage.setItem(LEGACY_IMPORT_MARK_KEY, previousMark);
-      return { status: "deferred", reason: "storage-failed", pending: [] };
-    }
-  }
+  const stamp: ImportStamp = { version: 3, status: "complete", importedAt: nowIso(), imported: accepted.length, skipped };
+  const committed = encodeQueue([...existing, ...accepted], stamp);
+  storage.setItem(QUEUE_KEY, committed);
+  // A write that did not stick (quota, private mode) committed nothing: the next start tries again.
+  if (storage.getItem(QUEUE_KEY) !== committed) return { status: "deferred", reason: "storage-failed", pending: [] };
+  storage.setItem(LEGACY_IMPORT_MARK_KEY, JSON.stringify(stamp));
   return { status: "imported", imported: accepted.length, skipped };
 }
 
