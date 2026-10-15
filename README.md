@@ -27,6 +27,8 @@ Claudio 把两件事分开处理：本地系统负责选歌、队列和播放可
 
 ## 架构
 
+产品范围、播放核心重建、日常字幕与 DJ 曲间衔接、Folia 融合边界、实施顺序与验收，统一以 [Claudio 统一实施方案](CLAUDIO_IMPLEMENTATION_PLAN.zh-CN.md) 为唯一实施依据。当前决定是重建核心与服务合同、复用独立能力，不再以最小改动保护旧编排；该目标尚未实施。本 README 的功能与 API 说明仍描述当前代码，旧私人聆听、模块化和 Live OS 文档只作历史参考。
+
 <p align="center">
   <img src="photos/claudio-core-implementation-architecture-refined-2026-08.png" alt="Claudio 核心工程架构" width="840" />
 </p>
@@ -168,6 +170,8 @@ DJ 质量脚本需要已配置的曲库与外部服务；可用命令和参数�
 ## 当前范围
 
 Claudio 当前专注于“可靠播放 + 有品味的表达”。歌词、热评、故事卡、复杂 scheduler 与未经验证的外部资料不在正式 DJ 写作链路内。
+
+统一方案中的 Folia 歌曲歌词展示属于待实现的可选展示层，与 DJ 写作输入分开；它尚不属于当前可用功能。
 
 ## 许可证
 
