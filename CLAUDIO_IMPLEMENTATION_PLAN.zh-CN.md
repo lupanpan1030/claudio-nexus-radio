@@ -317,8 +317,10 @@ R1允许先用fixture推进，不再要求先把旧播放器改正确。旧版�
 | R1d 完整UI所需合同 | `6d6748c`：手动voice、原子队列替换、候选ID预留/一次认领与停止态恢复已实施；共享HTTP与now generation另存`1721113` | 独立32条定向检查、7,457步有界状态检查通过；播放事件归因与aborted终态已在后续`f2c839e`收口；本行保留原检查点范围 |
 | R2 浏览器执行器 | 初版`1c675a4`，加固`020cd22`：锁初始化失败释放、late runtime回收、receipt取消、观察时钟与输出挂起处理已实施 | 后续`f2c839e`修复原生事件归因、aborted暂停恢复和共享seekEpoch：233项包测试、15项主仓浏览器场景通过；独立冻结重验18项原生浏览器及6项恢复模型通过。合成音频不等于物理设备中断验收 |
 | R3 服务端 | `848d0a1`完成文件身份、并发候选、now代际、handle激活、DJ上下文等加固；`cb936b9`统一共享路径/decoder与隔离测试发现 | 后续`a3fb788`、`7c81a5f`修GC/stream释放，`db4dfb8`验证真实DJ请求组装，`06b87ab`完成公开library ref及未知source保真。132项server测试零skip；独立HTTP/SQLite与stream回归通过。新预算切片另待验收 |
-| R3 完整UI切换 | `d2a0067`移除旧App/useAudio/AudioPlayer编排，接新runtime、v1 ports、两字幕与Folia pin；`6c60bf5`增加统一隔离测试入口 | 当前46项UI测试通过；中间版本真实browser基础播放/手动DJ/双页通过，但尚非终验。已复现媒体键反向动作、pending radio暂停后仍开播、library无ref导致迁移/喜欢失效；另待now冲突恢复、舞台ready与observer seek收口 |
-| R4 Folia舞台 | 独立仓修复版`0d33b05`，48单测、67项浏览器检查通过；干净提交已重建并导出 | 原生Lattice、失败恢复、完整对应源码包、依赖许可校验已落地；contractVersion=2。主仓adapter接线中，AGPL源码/产物不提交主仓 |
+| R3 完整UI切换 | `d2a0067`移除旧编排；`1eff819`完成媒体键、待选歌曲暂停、catalog映射、now冲突和启动生命周期；`372e90d`提交仓内应用browser工具 | 67项UI测试、同一源码10场景67项真实Chromium检查通过。独立三项UI回归、now 11项、startup 2项及100ms观察页seek通过。另发现stage探测预算后晚就绪重复歌词、protocol预取消与导入写入中断缺口，下一片继续修复，未称终验 |
+| R4 Folia舞台 | 独立仓`0d33b05`，48单测、67项浏览器检查通过；固定导出已接主仓 | 主页面中文高亮及owner/observer 100ms反向seek已通过；异步ready超过9秒预算后的双重显示另由独立真实浏览器复现，待修。对应源码及许可随导出提供，contractVersion=2，AGPL源码/产物不提交主仓 |
+| R1/R3 预算、字幕与队列选择 | `41ffba8`统一有界预算，`44fb7ab`在只读快照投影估算句级字幕，`b6145dd`确认select保留队列条目和预热 | 248项包测试、140项server测试零skip；独立select 3场景、projection 13场景、32组合env、3类operation及2条真实HTTP链通过，冻结前后源码一致。页面预算和字幕标签尚在接线 |
+| 工具链与隔离验证 | `bb59149`提交CI、隔离smoke与生产导入验证；`372e90d`增加可复跑应用browser工具 | 独立干净npm ci、无dist的开发服务和Vite入口通过；GitHub CI未实际执行。完整browser工具不接真实账户，DJ为合成tone，PCM为pre-master analyser读数 |
 | R5 日常观察 | 未开始 | 需真实使用时间，不能压缩成自动测试结果 |
 
 **2026-10-16实施记录：**实际实施模型为`claude-opus-5-5`，独立决策/审查模型为`claude-fable-5-1`，通过已登录的Claude Code运行。Fable先读固定代码快照形成独立意见，再与Codex交换复现和合同证据；不把中间快照缺少测试误记为最终版本缺少测试。
@@ -331,7 +333,7 @@ Claude Code曾触发会话额度限制；2026-10-16 09:21（Pacific/Auckland）�
 
 **本轮Fable/Codex追加决策：**已有队列条目选择保留其itemId、origin、预热媒体与其它队列，仍取消旧cue；播放历史点击创建新occurrence，外部整张歌单仍原子替换。统一服务端阶段预算、客户端HTTP和runtime守卫，prepare长任务先返回active再poll，环境配置只能降低有界上限；合法慢任务不应被较短的外层deadline提前截断。DJ纯文本只有在已知媒体时长且有多句边界时，才在core只读snapshot投影为明确标注的estimated句级字幕；不可变资产不改、未知时长仍plain-text，不制造逐字时间。Fable撤回手动next必须再询问用户的判断，沿用已确认的直接切歌语义；其复议报告残留的aborted未修文字已由新代码和独立证据纠正，不再作为待办。
 
-**当前待闭合：**完整UI媒体键、pending radio取消、真实library迁移/喜欢、now owner有界升代、Folia异步ready与观察页seek；上述预算/字幕/队列点击决策及仓内应用browser工具。另已用受控写入边界中断模型复现旧队列先写complete后save的恢复缺口，Opus下一切片改为可恢复写入；不是实际用户数据故障或真实浏览器崩溃验收。完成后在稳定版本统一跑测试、构建、生产启动及受影响浏览器链。真实账号、真实音箱/目标设备后台能力与R5日常使用继续单列，不能用合成WAV替代。
+**当前待闭合：**页面消费共享预算、估算字幕可见标签、已有队列行select接线；Folia渲染探测耗尽后仍可晚出现、protocol helper预取消两项边界。旧队列先写complete后save的恢复缺口已用受控写入边界中断模型复现，Opus下一切片改为可恢复写入，独立验收将以逐写边界子进程死亡/重启覆盖；不是实际用户数据故障或真实浏览器崩溃验收。媒体键、pending radio、真实library/喜欢、now恢复、普通stage ready与observer seek已按上表闭合。完成后在稳定版本统一跑测试、构建、生产启动及受影响浏览器链。真实账号、真实音箱/目标设备后台能力与R5日常使用继续单列，不能用合成WAV替代。
 
 R1a已经区分队列条目、录音版本、load、cue和transition，采用纯`step → state + effects`；准备不计已听，队列在有效playing后消费，同条目receipt幂等。已修复非法ISO日期变成无限期、非安全整数版本、歌词/字幕时序矛盾、响应内脚本/语音身份矛盾，以及seek跨过窗口后的迟到事件补播。seek越过本曲转场窗口时本次直接接歌；seek回窗口之前，后续自然到达可以按新cue重评未播资产。已开始的口播不重播。
 
@@ -343,7 +345,7 @@ R1c复议明确：自然耗尽保留播放意图并显示exhausted，迟到补�
 
 完整UI接线追加裁决：歌单选择与后续条目一次替换；聊天的多字段建议先规范化，不能假设连续dispatch之间绝无媒体事实。用户已作新播放/队列决定后，迟到的破坏性聊天建议保留为文字或待显式采纳，不自动插队或开播。刷新恢复当前项在首的停止态队列，不恢复位置、历史、旧itemId或cue；恢复前不准备、不发声。上一首来自本次运行真实started历史，经新occurrence选择。电台补歌由owner应用服务负责单飞、有限重试与取消，候选仅准备一次；这明确更新了早期“ID只能由core调用工厂生成”的细节，未改变队列由core接受与管理。
 
-服务端复议采纳同origin执行器单调generation作为`/now`跨实例代际，seq只在同实例内比较，避免旧首条投影迟到取代新页；不宣称跨设备仲裁。stream的首次成功打开记录activation，未激活的过期handle拒绝；已激活的Range保留宽限，activation不算started，也不证明同一handle以后没有被重复装载。上述server行为已在`848d0a1`验证；UI当前owner在409后有界升代恢复仍待实现。真实DJ上下文已接started与from/to，生成去重明确不是“已听到”；实际最终模型请求组装链已在`db4dfb8`经两轮隔离HTTP请求验证，不仅是formatter检查。
+服务端复议采纳同origin执行器单调generation作为`/now`跨实例代际，seq只在同实例内比较，避免旧首条投影迟到取代新页；不宣称跨设备仲裁。stream的首次成功打开记录activation，未激活的过期handle拒绝；已激活的Range保留宽限，activation不算started，也不证明同一handle以后没有被重复装载。上述server行为已在`848d0a1`验证；UI当前owner在409后有界升代恢复已在`1eff819`实现，并通过11项独立检查。真实DJ上下文已接started与from/to，生成去重明确不是“已听到”；实际最终模型请求组装链已在`db4dfb8`经两轮隔离HTTP请求验证，不仅是formatter检查。
 
 播放事件复议：Fable已根据原生反例撤回“无论是否欠原生pause都立即合成ack”及“aborted只记note”的早期建议；双方均不接受把当前play ID贴到任意DOM playing上作归因，或用Promise resolve代替有效媒体事实。当前每effect确认数量/DOM pause ordinal方案与其更早boolean稿不同，需按实际实现验收；PlayRequestId只用于请求拒绝的身份，不声称DOM事件携带该ID。Codex保留一致的count合同，并要求driver覆盖外部已排队pause、失效ended与seek屏障；真正未请求的暂停不能靠core猜测成seek竞争而吞掉。未实际核对的浏览器内部实现与物理OS中断均不列为已证事实。
 
