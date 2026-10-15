@@ -1,11 +1,11 @@
 import { asId, type ErrorInfo, type HistoryOutcome, type IdempotencyKey, type QueueItemId } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { finishCue, isCuePlayable, pauseCue, startCue } from "./cue.js";
+import { cancelCue, cancelManualCue, clearRetainedFor, finishCue, isCuePlayable, manualDuckTarget, pauseCue, startCue, syncManualDuck } from "./cue.js";
 import { deckById, deckHoldingItem, deckWithRole, holdDeck, idleDeck, loadDeck, pauseDeck, playDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics, requestLyrics } from "./lyrics.js";
 import { dropPrep, ensureResolved } from "./prep.js";
 import { findEntry, nextEntry, pushHistory, removeEntry } from "./queue.js";
-import { cancelTransition, degradeToDirect, planTransition, startTalking, windowSkippedBySeek } from "./transition.js";
+import { cancelTransition, degradeToDirect, planTransition, resumeAutoNarration, startTalking, windowSkippedBySeek } from "./transition.js";
 import type { DeckState, QueueEntry } from "./state.js";
 
 /**
@@ -23,6 +23,8 @@ export function activateProgram(ctx: StepContext, entry: QueueEntry, options: { 
   const { s } = ctx;
   s.program = { item: entry.item, deck: null, started: false, resumeAtMs: 0, seekFloorMs: null, error: null };
   entry.reservation = "program";
+  // Retained narration introduces one item; another program never inherits it.
+  if (s.retainedNarration && s.retainedNarration.binding.toItemId !== entry.item.itemId) s.retainedNarration = null;
   const held = deckHoldingItem(ctx, entry.item.itemId);
   if (held) {
     held.role = "program";
@@ -49,7 +51,8 @@ export function loadProgramIfResolved(ctx: StepContext): void {
     media,
     role: "program",
     startAtMs: program.resumeAtMs,
-    gain: 1,
+    // A same-source reload under a manual replay stays ducked.
+    gain: manualDuckTarget(ctx.s),
     wantPlaying: true
   });
   program.deck = deck.id;
@@ -82,7 +85,7 @@ export function checkStarted(ctx: StepContext): void {
   const program = s.program;
   if (!program || program.started || program.deck === null || s.intent !== "play") return;
   const deck = deckById(ctx, program.deck);
-  if (deck.role !== "program" || deck.status !== "playing" || deck.pauseAwaited || deck.itemId !== program.item.itemId) return;
+  if (deck.role !== "program" || deck.status !== "playing" || deck.pausesAwaited > 0 || deck.itemId !== program.item.itemId) return;
   if (deck.loadId === null || deck.media === null) return;
   program.started = true;
   removeEntry(s, program.item.itemId);
@@ -168,6 +171,9 @@ export function retireProgram(ctx: StepContext, outcome: HistoryOutcome, options
   const program = s.program;
   if (!program) return;
   const itemId = program.item.itemId;
+  // A manual replay belongs to this program and never runs on into the next item.
+  if (s.cue?.origin === "manual") cancelCue(ctx, { keepUnspokenAsset: false });
+  clearRetainedFor(ctx, itemId);
   pushHistory(s, program.item, outcome, program.started);
   removeEntry(s, itemId);
   if (program.deck !== null) {
@@ -214,6 +220,17 @@ export function onProgramEnded(ctx: StepContext): void {
   const program = s.program;
   const transition = s.transition;
   if (!program) return;
+  if (cancelManualCue(ctx)) {
+    // The listener's replay was still on when A ended: it stops with A and the
+    // hand-over is direct; no stale automatic narration starts mid-hand-over.
+    if (transition && transition.fromItemId === program.item.itemId && transition.phase === "planned") {
+      degradeToDirect(ctx, transition, "manual narration was on at A's end");
+      completeAndAdvance(ctx);
+      return;
+    }
+    advance(ctx, "played");
+    return;
+  }
   if (transition && transition.fromItemId === program.item.itemId) {
     if (transition.phase === "prerolling") {
       // A's end is the preroll deadline: B never confirmed playing within the lead.
@@ -275,6 +292,12 @@ export function commitOverlap(ctx: StepContext): void {
 /** Voice finished/failed during a transition. */
 export function onCueFinished(ctx: StepContext, status: "ended" | "failed"): void {
   const { s } = ctx;
+  if (s.cue?.origin === "manual") {
+    finishCue(ctx, status);
+    syncManualDuck(ctx);
+    resumeAutoNarration(ctx);
+    return;
+  }
   finishCue(ctx, status);
   const transition = s.transition;
   if (!transition) return;
@@ -294,6 +317,14 @@ export function releaseDuck(ctx: StepContext): void {
   if (program) setGain(ctx, program, 1, ctx.s.config.fadeMs);
   const outgoing = deckWithRole(ctx, "outgoing");
   if (outgoing) setGain(ctx, outgoing, 0, ctx.s.config.fadeMs);
+}
+
+/** The voice continues over a crossfade: B under the voice, A ducked (as commitOverlap). */
+export function duckUnderVoice(ctx: StepContext): void {
+  const program = deckWithRole(ctx, "program");
+  if (program) setGain(ctx, program, ctx.s.config.underVoiceGain, ctx.s.config.fadeMs);
+  const outgoing = deckWithRole(ctx, "outgoing");
+  if (outgoing) setGain(ctx, outgoing, ctx.s.config.duckGain, ctx.s.config.fadeMs);
 }
 
 /** Overlap completes once no voice remains and the outgoing deck is gone. */

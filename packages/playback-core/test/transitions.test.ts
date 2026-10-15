@@ -381,7 +381,7 @@ test("crossfade preroll rejected: A keeps playing and the hand-over degrades to 
   const { sim, a, b } = setup({ preferredTalkMode: "talk-over-crossfade" });
   sim.cueReady();
   sim.deck(a, { kind: "time", positionMs: 195_000, rate: 1 });
-  sim.deck(b, { kind: "play-rejected", reason: "not-allowed" });
+  sim.rejectPlay(b, "not-allowed");
   assert.equal(sim.snap.transition?.phase, "planned");
   assert.equal(sim.snap.transition?.mode, "sequential-talk");
   assert.equal(sim.snap.program?.item.itemId, a);

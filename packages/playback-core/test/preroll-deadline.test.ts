@@ -30,11 +30,11 @@ test("A's end is the preroll deadline: with a playable cue it talks at once, B h
   assert.equal(sim.snap.decks[bLoad.deck].gain, 0);
   assert.equal(sim.snap.program?.item.itemId, a, "B is not program while the DJ talks");
 
-  // B's earlier play lands after the hold: it is neither committed nor allowed to drift on.
-  const late = sim.mark();
-  sim.deck(b, { kind: "playing", positionMs: 120 });
+  // B's earlier play lands after the hold, before the hold's pause acknowledgement: it predates the hold.
+  const late = sim.deck(b, { kind: "playing", positionMs: 120 });
+  assert.equal(late.notes[0]?.kind, "stale");
   assert.equal(sim.snap.transition?.phase, "talking");
-  assert.ok(sim.effects("deck.pause", late).some((e) => e.loadId === bLoad.loadId));
+  assert.equal(sim.snap.decks[bLoad.deck].status, "ready", "never seen as playing");
   sim.deck(b, { kind: "paused", positionMs: 130, atEnd: false, requested: true });
   sim.deck(b, { kind: "seeked", positionMs: 0 });
   assert.equal(sim.receipts().length, 1);

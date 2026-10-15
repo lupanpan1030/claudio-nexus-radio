@@ -162,6 +162,8 @@ test("A ending during a preroll talks at once; a stray playing on the ended A is
   assert.equal(sim.snap.transition?.phase, "talking");
   sim.voice({ kind: "playing", positionMs: 0 });
   sim.voiceNaturalEnd();
+  // B was held when A ended; its pause is acknowledged before the promoted play can count.
+  sim.deck(b, { kind: "paused", positionMs: 0, atEnd: false, requested: true });
   sim.deck(b, { kind: "seeked", positionMs: 0 });
   sim.deck(b, { kind: "playing", positionMs: 0 });
   assert.equal(sim.snap.program?.item.itemId, b);

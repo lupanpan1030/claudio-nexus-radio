@@ -74,15 +74,17 @@ test("pause and resume never produce another receipt and re-anchor gains", () =>
   assert.equal(sim.receipts().length, 1);
 });
 
-test("a late playing event after pause is pushed back to paused and does not count", () => {
+test("a late playing event after pause predates the pause and does not count", () => {
   const sim = new Sim({}, { djEnabled: false });
   const [a] = sim.enqueue("a");
   sim.cmd({ type: "resume" });
   sim.resolve(a!);
   sim.cmd({ type: "pause" });
   const mark = sim.mark();
-  sim.deck(a!, { kind: "playing", positionMs: 0 });
-  assert.equal(sim.effects("deck.pause", mark).length, 1, "intent enforced again");
+  const late = sim.deck(a!, { kind: "playing", positionMs: 0 });
+  assert.equal(late.notes[0]?.kind, "stale", "the pause acknowledgement is still owed: this playing came before it");
+  assert.equal(sim.effects("deck.pause", mark).length, 0, "nothing to push back: the owed pause event follows");
+  assert.equal(sim.snap.transport, "paused");
   assert.equal(sim.receipts().length, 0);
   // The element answers the first pause (it had been asked to play, so it fires `pause`).
   sim.deck(a!, { kind: "paused", positionMs: 40, atEnd: false, requested: true });
@@ -96,7 +98,7 @@ test("play() rejection blocks without recording; a user resume recovers", () => 
   const [a] = sim.enqueue("a");
   sim.cmd({ type: "resume" });
   sim.resolve(a!);
-  sim.deck(a!, { kind: "play-rejected", reason: "not-allowed" });
+  sim.rejectPlay(a!, "not-allowed");
   assert.equal(sim.snap.transport, "blocked");
   assert.equal(sim.receipts().length, 0);
 

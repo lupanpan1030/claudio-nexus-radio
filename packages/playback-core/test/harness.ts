@@ -7,6 +7,7 @@ import {
   type PlaybackCommand,
   type PlaybackEffect,
   type PlaybackFact,
+  type PlayRejection,
   type QueueItemId,
   type RecordingConfidence,
   type ResolvedMedia,
@@ -168,6 +169,20 @@ export class Sim {
       asset
     });
     return options.playable === false ? result : this.voice({ kind: "can-play", through: true });
+  }
+
+  /** The latest deck.play of the item's load is refused (its promise rejected). */
+  rejectPlay(itemId: QueueItemId, reason: PlayRejection = "not-allowed"): StepResult {
+    const { deck, loadId } = this.loadOf(itemId);
+    const play = this.lastEffect("deck.play", (effect) => effect.loadId === loadId);
+    return this.fact({ type: "deck.media", deck, loadId, event: { kind: "play-rejected", reason, playId: play.playId } });
+  }
+
+  /** The latest voice.play of the current voice load is refused. */
+  rejectVoice(reason: PlayRejection = "not-allowed"): StepResult {
+    const load = this.lastEffect("voice.load");
+    const play = this.lastEffect("voice.play", (effect) => effect.voiceLoadId === load.voiceLoadId);
+    return this.voice({ kind: "play-rejected", reason, playId: play.playId });
   }
 
   voice(event: MediaEvent): StepResult {

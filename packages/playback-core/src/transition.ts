@@ -7,7 +7,7 @@ import {
   type TransitionMode
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { cancelCue, isCuePlayable, requestCue, startCue } from "./cue.js";
+import { cancelTransitionCue, isCuePlayable, newCue, requestCue, startCue } from "./cue.js";
 import { deckHoldingItem, deckPosition, deckWithRole, holdDeck, playDeck, setGain, unloadDeck } from "./decks.js";
 import { pairKey, type TransitionState } from "./state.js";
 
@@ -74,10 +74,39 @@ export function requestNarration(ctx: StepContext, transition: TransitionState):
  * reached by playing (e.g. after seeking back before it).
  */
 function skipSeekedWindow(ctx: StepContext, transition: TransitionState): void {
-  if (ctx.s.cue) cancelCue(ctx, { keepUnspokenAsset: true });
+  cancelTransitionCue(ctx, { keepUnspokenAsset: true });
   transition.cueId = null;
   transition.mode = "direct";
   ctx.note("decision", "narration window skipped by seek; not caught up");
+}
+
+/**
+ * The voice channel became free after a manual replay. A planned transition
+ * gets its narration back: a parked request continues as the cue, otherwise
+ * narration is requested again, reusing an asset that arrived meanwhile.
+ */
+export function resumeAutoNarration(ctx: StepContext): void {
+  const { s } = ctx;
+  if (s.cue) return;
+  const transition = s.transition;
+  const parked = s.parkedCue;
+  if (!transition || transition.phase !== "planned") {
+    if (parked) {
+      ctx.cancelOperation(parked.opId);
+      s.parkedCue = null;
+    }
+    return;
+  }
+  if (parked) {
+    s.parkedCue = null;
+    if (parked.binding.transitionId === transition.transitionId && s.pending[parked.opId]) {
+      s.cue = newCue("transition", parked.binding, parked.opId);
+      return;
+    }
+    ctx.cancelOperation(parked.opId);
+    transition.cueId = null;
+  }
+  if (transition.cueId === null && transition.mode !== "direct" && s.settings.djEnabled) requestNarration(ctx, transition);
 }
 
 /**
@@ -95,7 +124,7 @@ export function cancelTransition(
   const { s } = ctx;
   const transition = s.transition;
   if (!transition) return;
-  cancelCue(ctx, options);
+  cancelTransitionCue(ctx, options);
   if (transition.phase === "prerolling" && !options.keepPreroll) {
     const standby = deckHoldingItem(ctx, transition.toItemId);
     if (standby && standby.role === "standby") holdDeck(ctx, standby);
@@ -114,9 +143,9 @@ export function cancelTransition(
 
 /** Narration may no longer start (cue missing/late/off): remove it, keep the hand-over. */
 export function degradeToDirect(ctx: StepContext, transition: TransitionState, reason: string): void {
-  if (ctx.s.cue) {
+  if (ctx.s.cue?.origin === "transition" || ctx.s.parkedCue) {
     ctx.note("decision", `narration dropped: ${reason}`);
-    cancelCue(ctx, { keepUnspokenAsset: false });
+    cancelTransitionCue(ctx, { keepUnspokenAsset: false });
   }
   transition.cueId = null;
   transition.mode = "direct";

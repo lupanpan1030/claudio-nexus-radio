@@ -13,8 +13,8 @@ import {
   type ResolvedMedia
 } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { isVoiceActive, isVoiceExpired, markCueReady, pauseCue, voiceRate } from "./cue.js";
-import { deckPosition, holdDeck, pauseDeck, unloadDeck } from "./decks.js";
+import { cancelManualCue, clearRetainedFor, isVoiceActive, isVoiceExpired, markCueReady, pauseCue, syncRetainedNarration, voiceRate } from "./cue.js";
+import { deckPosition, holdDeck, pauseDeck, requestPlay, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { refreshSource } from "./prep.js";
 import {
@@ -93,7 +93,7 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
       return onDeckPlaying(ctx, deck, event.positionMs);
     case "waiting":
       if (deck.status === "ended") return duplicate(ctx, "waiting after ended");
-      if (deck.pauseAwaited) return stale(ctx, `deck ${deckId} waiting from before the requested pause`);
+      if (deck.pausesAwaited > 0) return stale(ctx, `deck ${deckId} waiting from before the requested pause`);
       deck.status = "waiting";
       deck.clock = { positionMs: deck.seekPendingMs ?? event.positionMs, observedAt: at, rate: 0 };
       return "applied";
@@ -117,6 +117,8 @@ function onDeckMedia(ctx: StepContext, deckId: DeckId, loadId: LoadId, event: Me
       if (deck.seekPendingMs !== null) return stale(ctx, `deck ${deckId} ended from before the pending seek`);
       return onDeckEnded(ctx, deck);
     case "play-rejected":
+      // A promise answers one play() call: a rejection of an earlier call says nothing about the latest.
+      if (event.playId !== deck.playId) return stale(ctx, `deck ${deckId} rejection of a superseded play`);
       return onDeckRejected(ctx, deck, event.reason);
     case "error":
       return onDeckError(ctx, deck, event.error);
@@ -131,8 +133,9 @@ function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): F
     pauseDeck(ctx, deck);
     return duplicate(ctx, `deck ${deck.id} playing after ended`);
   }
-  // Per-element order: this happened before the pause the core asked for, so it confirms nothing.
-  if (deck.pauseAwaited) return stale(ctx, `deck ${deck.id} playing from before the requested pause`);
+  // Per-element order: this happened before a pause the core asked for, so it confirms nothing,
+  // also for a play that was never confirmed (hold → promote → late playing of the first play).
+  if (deck.pausesAwaited > 0) return stale(ctx, `deck ${deck.id} playing from before the requested pause`);
   deck.status = "playing";
   deck.readiness = raiseReadiness(deck.readiness, "can-play");
   const pending = deck.seekPendingMs;
@@ -165,7 +168,7 @@ function onDeckPlaying(ctx: StepContext, deck: DeckState, positionMs: number): F
 
 function onDeckPaused(ctx: StepContext, deck: DeckState, event: Extract<MediaEvent, { kind: "paused" }>): FactResult {
   const { s } = ctx;
-  deck.pauseAwaited = false;
+  if (event.requested) deck.pausesAwaited = Math.max(0, deck.pausesAwaited - 1);
   if (deck.status === "ended") return duplicate(ctx, "paused after ended");
   const clock = { positionMs: deck.seekPendingMs ?? event.positionMs, observedAt: ctx.now, rate: 0 };
   if (event.atEnd) {
@@ -178,6 +181,13 @@ function onDeckPaused(ctx: StepContext, deck: DeckState, event: Extract<MediaEve
   // The core's own pause may land after a later play request (hold → promote → play):
   // it answers a superseded request and is never an interruption.
   if (event.requested) return "applied";
+  if (deck.role === "program" && s.intent === "play" && deck.wantPlaying && deck.seekPendingMs !== null) {
+    // A seek raced the natural end: the end's `pause` was dispatched after the seek cleared
+    // element.ended, so it reads as unrequested. The listener just sought: play on.
+    ctx.note("decision", "pause while a seek is pending; playing on from the seek target");
+    requestPlay(ctx, deck);
+    return "applied";
+  }
   // An external pause of output that should sound (OS/media interruption) becomes a
   // transport pause, so the voice stops with the music and resume restarts both.
   if (deck.role === "program" && s.intent === "play" && deck.wantPlaying) {
@@ -191,7 +201,6 @@ function onDeckEnded(ctx: StepContext, deck: DeckState): FactResult {
   if (deck.status === "ended") return duplicate(ctx, `deck ${deck.id} ended twice`);
   deck.status = "ended";
   deck.wantPlaying = false;
-  deck.pauseAwaited = false;
   if (deck.clock) deck.clock = { ...deck.clock, rate: 0 };
   if (deck.role === "program") onProgramEnded(ctx);
   else if (deck.role === "outgoing") {
@@ -203,6 +212,12 @@ function onDeckEnded(ctx: StepContext, deck: DeckState): FactResult {
 
 function onDeckRejected(ctx: StepContext, deck: DeckState, reason: string): FactResult {
   const { s } = ctx;
+  if (reason === "aborted") {
+    // AbortError means a pause()/load()/end interrupted the play; that interruption
+    // arrives as its own fact and decides the state. Nothing to block on here.
+    ctx.note("decision", `deck ${deck.id} play aborted`);
+    return "applied";
+  }
   if (deck.role === "program") {
     // Needs a user gesture; nothing pretends to be playing.
     s.blocked = true;
@@ -283,7 +298,10 @@ function onPrepareResolved(ctx: StepContext, fact: Extract<PlaybackFact, { type:
   const previous = prep.media;
   prep.media = fact.media;
   if (previous && !isSameSource(previous, fact.media)) onSourceChanged(ctx, fact.itemId, fact.media);
-  else syncTransitionRevision(ctx, fact.itemId, fact.media);
+  else {
+    syncRetainedNarration(ctx, fact.itemId, fact.media);
+    syncTransitionRevision(ctx, fact.itemId, fact.media);
+  }
   const program = s.program;
   if (program && program.item.itemId === fact.itemId) {
     if (previous && !isSameSource(previous, fact.media)) program.resumeAtMs = 0;
@@ -303,6 +321,9 @@ function onSourceChanged(ctx: StepContext, itemId: QueueItemId, media: ResolvedM
   const { s } = ctx;
   ctx.note("decision", `source revision changed for ${itemId}`);
   dropLyrics(ctx, itemId);
+  // Narration spoken for the old recording is neither replayed nor kept on.
+  if (s.cue?.origin === "manual" && s.cue.binding.toItemId === itemId) cancelManualCue(ctx);
+  clearRetainedFor(ctx, itemId);
   if (s.reusableCue && (s.reusableCue.fromItemId === itemId || s.reusableCue.toItemId === itemId)) s.reusableCue = null;
   const transition = s.transition;
   if (transition && (transition.fromItemId === itemId || transition.toItemId === itemId)) {
@@ -312,6 +333,8 @@ function onSourceChanged(ctx: StepContext, itemId: QueueItemId, media: ResolvedM
     // A preheated load of the old recording must not become program output.
     if (deck.itemId === itemId && deck.role === "standby" && deck.media && !isSameSource(deck.media, media)) unloadDeck(ctx, deck);
   }
+  // Cancelling a transition retains narration that spoke; never for the recording that just changed.
+  clearRetainedFor(ctx, itemId);
   planAhead(ctx);
 }
 
@@ -319,10 +342,14 @@ function syncTransitionRevision(ctx: StepContext, itemId: QueueItemId, media: Re
   const transition = ctx.s.transition;
   if (!transition) return;
   const revision = media.sourceRevision;
+  const { s } = ctx;
+  const cueOfTransition = s.cue?.origin === "transition" ? s.cue : null;
   if (transition.fromItemId === itemId && transition.fromRevision !== revision) {
     if (transition.fromRevision === null) {
       transition.fromRevision = revision;
-      if (ctx.s.cue) ctx.s.cue.binding = { ...ctx.s.cue.binding, fromRevision: revision };
+      if (cueOfTransition) cueOfTransition.binding = { ...cueOfTransition.binding, fromRevision: revision };
+      if (s.parkedCue) s.parkedCue = { ...s.parkedCue, binding: { ...s.parkedCue.binding, fromRevision: revision } };
+      if (s.reusableCue && s.reusableCue.fromItemId === itemId && s.reusableCue.fromRevision === null) s.reusableCue = { ...s.reusableCue, fromRevision: revision };
     } else {
       cancelTransition(ctx, "source-changed", { keepUnspokenAsset: false });
       planAhead(ctx);
@@ -332,7 +359,9 @@ function syncTransitionRevision(ctx: StepContext, itemId: QueueItemId, media: Re
   if (transition.toItemId === itemId) {
     if (transition.toRevision === null) {
       transition.toRevision = revision;
-      if (ctx.s.cue) ctx.s.cue.binding = { ...ctx.s.cue.binding, toRevision: revision };
+      if (cueOfTransition) cueOfTransition.binding = { ...cueOfTransition.binding, toRevision: revision };
+      if (s.parkedCue) s.parkedCue = { ...s.parkedCue, binding: { ...s.parkedCue.binding, toRevision: revision } };
+      if (s.reusableCue && s.reusableCue.toItemId === itemId && s.reusableCue.toRevision === null) s.reusableCue = { ...s.reusableCue, toRevision: revision };
     } else if (transition.toRevision !== revision) {
       cancelTransition(ctx, "source-changed", { keepUnspokenAsset: false });
       planAhead(ctx);
@@ -367,10 +396,16 @@ function onPrepareFailure(ctx: StepContext, itemId: QueueItemId, error: ErrorInf
 
 // ---------------------------------------------------------------- narration
 
+function isParked(ctx: StepContext, fact: { readonly opId: string; readonly cueId: string }): boolean {
+  const parked = ctx.s.parkedCue;
+  return parked !== null && parked.opId === fact.opId && parked.binding.cueId === fact.cueId;
+}
+
 function onCueReady(ctx: StepContext, fact: Extract<PlaybackFact, { type: "cue.ready" }>): FactResult {
   const { s } = ctx;
   const cue = s.cue;
   const transition = s.transition;
+  if (isParked(ctx, fact)) return onParkedCueReady(ctx, fact);
   if (!cue || cue.binding.cueId !== fact.cueId || cue.opId !== fact.opId || cue.binding.transitionId !== fact.transitionId) {
     return stale(ctx, "cue result for a cancelled/unknown cue");
   }
@@ -389,7 +424,43 @@ function onCueReady(ctx: StepContext, fact: Extract<PlaybackFact, { type: "cue.r
   return "applied";
 }
 
+/**
+ * Narration generated while a manual replay held the voice: keep it as an
+ * unspoken reusable asset for its pair; it is loaded when the channel frees.
+ */
+function onParkedCueReady(ctx: StepContext, fact: Extract<PlaybackFact, { type: "cue.ready" }>): FactResult {
+  const { s } = ctx;
+  const parked = s.parkedCue;
+  const transition = s.transition;
+  if (!parked || parked.binding.transitionId !== fact.transitionId || !ctx.closeOperation(fact.opId, "cue")) {
+    return stale(ctx, "cue result for a cancelled/unknown parked cue");
+  }
+  s.parkedCue = null;
+  if (!transition || transition.transitionId !== fact.transitionId) return "applied";
+  transition.cueId = null;
+  if (isVoiceExpired(ctx, fact.asset)) {
+    ctx.note("decision", "parked narration arrived already expired; handing over directly");
+    transition.mode = "direct";
+    return "applied";
+  }
+  const { fromItemId, toItemId, fromRevision, toRevision } = parked.binding;
+  s.reusableCue = { fromItemId, toItemId, fromRevision, toRevision, asset: fact.asset };
+  ctx.note("decision", "narration ready while a manual replay speaks; kept for when the voice is free");
+  return "applied";
+}
+
 function onCueSettled(ctx: StepContext, fact: Extract<PlaybackFact, { type: "cue.settled" }>): FactResult {
+  if (isParked(ctx, fact)) {
+    if (!ctx.closeOperation(fact.opId, "cue")) return stale(ctx, "cue settlement for a cancelled parked cue");
+    ctx.s.parkedCue = null;
+    ctx.note("decision", `parked narration ${fact.outcome}${fact.error ? ` (${fact.error.code})` : ""}`);
+    const parkedTransition = ctx.s.transition;
+    if (parkedTransition && parkedTransition.cueId === fact.cueId) {
+      parkedTransition.cueId = null;
+      parkedTransition.mode = "direct";
+    }
+    return "applied";
+  }
   const cue = ctx.s.cue;
   if (!cue || cue.binding.cueId !== fact.cueId || cue.opId !== fact.opId || !ctx.closeOperation(fact.opId, "cue")) {
     return stale(ctx, "cue settlement for a cancelled/unknown cue");
@@ -459,8 +530,8 @@ function onVoiceMedia(ctx: StepContext, fact: Extract<PlaybackFact, { type: "voi
       onCueFinished(ctx, "ended");
       return "applied";
     case "play-rejected":
-      // Only a pending voice.play can be refused; after a pause it answers a superseded request.
-      if (cue.status !== "starting") return stale(ctx, `voice play rejection (${event.reason}) for a superseded play`);
+      // Only the pending voice.play can be refused; anything else answers a superseded request.
+      if (cue.status !== "starting" || event.playId !== cue.playId) return stale(ctx, `voice play rejection (${event.reason}) for a superseded play`);
       ctx.note("decision", `voice failed (${event.reason}); continuing music`);
       onCueFinished(ctx, "failed");
       return "applied";

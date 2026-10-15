@@ -57,14 +57,70 @@ export interface DeckSnapshot {
  */
 export type CueStatus = "requested" | "ready" | "starting" | "speaking" | "waiting" | "paused" | "ended" | "cancelled" | "failed";
 
+/**
+ * Who started the voice cue: an automatic transition, or the listener's
+ * explicit replay of the current program's retained narration.
+ */
+export type CueOrigin = "transition" | "manual";
+
+/**
+ * Why a voice is paused (status "paused"):
+ *  transport: a global pause; a global resume continues it
+ *  user:      voice.pause; only voice.resume continues it
+ */
+export type VoicePausedBy = "transport" | "user";
+
 export interface VoiceSnapshot {
   readonly cueId: CueId;
+  /** For a manual cue: the transition whose narration is being replayed. */
   readonly transitionId: TransitionId;
+  readonly origin: CueOrigin;
   readonly status: CueStatus;
+  readonly pausedBy: VoicePausedBy | null;
   readonly voiceLoadId: VoiceLoadId | null;
   readonly clock: MediaClockSample | null;
   readonly scriptText: string | null;
   readonly subtitle: SubtitleTrack | null;
+}
+
+/**
+ * Why the current program's narration cannot be replayed right now.
+ *  no-narration:          nothing was spoken into this item (e.g. the first
+ *                         track, DJ off, cue failed); never fabricated
+ *  not-started:           the program has not confirmed playing yet
+ *  recording-changed:     the program's actual recording/revision differs
+ *                         from the one the narration was bound to
+ *  expired:               the voice asset's stream expired
+ *  voice-active:          a voice cue is active (stop it first)
+ *  transition-executing:  the hand-over to the next item is under way
+ *  transport-not-playing: paused/stopped/blocked/loading transport
+ */
+export type NarrationReplayBlock =
+  | "no-narration"
+  | "not-started"
+  | "recording-changed"
+  | "expired"
+  | "voice-active"
+  | "transition-executing"
+  | "transport-not-playing";
+
+/** Narration that introduced the current program, kept for explicit replay. */
+export interface RetainedNarrationView {
+  readonly itemId: QueueItemId;
+  /** Automatic cue that spoke it originally. */
+  readonly cueId: CueId;
+  readonly transitionId: TransitionId;
+  readonly scriptText: string;
+  readonly subtitle: SubtitleTrack;
+  /** Spoken length in ms at the asset's playback rate; null when not measured. */
+  readonly spokenMs: number | null;
+  readonly expiresAt: RuntimeClockMs | null;
+}
+
+export interface NarrationSnapshot {
+  /** Null when the current program has no retained narration. */
+  readonly retained: RetainedNarrationView | null;
+  readonly replay: { readonly available: true } | { readonly available: false; readonly reason: NarrationReplayBlock };
 }
 
 export type LyricsView =
@@ -79,6 +135,8 @@ export type LyricsView =
  * What subtitles should follow right now. Music lyrics follow the program
  * deck clock and revision; DJ subtitles follow the voice clock and cue, and
  * only once the voice element confirmed `playing` (a requested play is not speech).
+ * Only automatic transition narration takes over the display; a manual
+ * replay leaves the program lyrics here and is shown from `voice`.
  */
 export type DisplayItem =
   | { readonly kind: "none" }
@@ -120,6 +178,7 @@ export interface PlaybackSnapshot {
   readonly program: ProgramSnapshot | null;
   readonly decks: { readonly A: DeckSnapshot; readonly B: DeckSnapshot };
   readonly voice: VoiceSnapshot | null;
+  readonly narration: NarrationSnapshot;
   readonly transition: TransitionPlan | null;
   readonly display: DisplayItem;
   readonly queue: readonly QueueEntrySnapshot[];

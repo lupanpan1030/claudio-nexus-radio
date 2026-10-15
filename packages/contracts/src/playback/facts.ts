@@ -1,4 +1,4 @@
-import type { CueId, IdempotencyKey, LoadId, OperationId, QueueItemId, SourceRevision, TransitionId, VoiceLoadId } from "../ids.js";
+import type { CueId, IdempotencyKey, LoadId, OperationId, PlayRequestId, QueueItemId, SourceRevision, TransitionId, VoiceLoadId } from "../ids.js";
 import type { ResolvedMedia } from "../media.js";
 import type { CueAsset } from "../narration.js";
 import type { LyricsAvailability } from "../lyrics.js";
@@ -37,11 +37,10 @@ export type MediaEvent =
    * the end arriving, not an interruption. Never inferred from position vs duration:
    * a real pause just before the end must still count as a pause.
    *
-   * `requested` is true when this event answers the executor's own pause()
-   * call for a deck.pause/voice.pause effect. pause() on an already paused
-   * element fires nothing, so the executor counts only calls it made while
-   * `element.paused` was false and consumes one per `pause` event. Such an
-   * event may arrive after a later play request; it is never an interruption.
+   * `requested` is true when this fact acknowledges a deck.pause/voice.pause
+   * effect: exactly one per effect (see deck.pause), either the DOM `pause`
+   * event that answers it or, when no event is owed, one reported at once.
+   * It may arrive after a later play request; it is never an interruption.
    * false = the platform/OS/another agent paused the element.
    */
   | { readonly kind: "paused"; readonly positionMs: number; readonly atEnd: boolean; readonly requested: boolean }
@@ -53,7 +52,8 @@ export type MediaEvent =
   | { readonly kind: "seeked"; readonly positionMs: number }
   | { readonly kind: "time"; readonly positionMs: number; readonly rate: number }
   | { readonly kind: "ended" }
-  | { readonly kind: "play-rejected"; readonly reason: PlayRejection }
+  /** The play() promise of the deck.play/voice.play with this playId was rejected. */
+  | { readonly kind: "play-rejected"; readonly reason: PlayRejection; readonly playId: PlayRequestId }
   | { readonly kind: "error"; readonly error: ErrorInfo };
 
 export type ReceiptOutcome = "recorded" | "duplicate" | "failed";

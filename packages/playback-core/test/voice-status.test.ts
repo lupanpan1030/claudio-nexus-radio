@@ -39,7 +39,7 @@ test("voice play rejected never becomes speaking; the music continues", () => {
   sim.naturalEnd(a);
   const seen: string[] = [];
   seen.push(sim.snap.display.kind);
-  sim.voice({ kind: "play-rejected", reason: "not-allowed" });
+  sim.rejectVoice("not-allowed");
   seen.push(sim.snap.display.kind);
   assert.deepEqual(seen, ["music", "music"]);
   assert.equal(sim.snap.program?.item.itemId, b);

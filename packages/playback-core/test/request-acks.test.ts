@@ -146,7 +146,7 @@ test("a voice play rejection that answers a play already paused is ignored; resu
   sim.cueReady();
   sim.naturalEnd(a!);
   sim.cmd({ type: "pause" });
-  const late = sim.voice({ kind: "play-rejected", reason: "aborted" });
+  const late = sim.rejectVoice("aborted");
   assert.equal(late.notes[0]?.kind, "stale");
   assert.equal(sim.snap.transition?.phase, "talking", "not treated as a failed voice");
   sim.cmd({ type: "resume" });

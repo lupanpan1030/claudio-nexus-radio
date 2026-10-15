@@ -19,6 +19,12 @@ export type LoadId = Brand<string, "LoadId">;
 export type TransitionId = Brand<string, "TransitionId">;
 /** Identity of one narration cue (script + voice version) bound to a transition. */
 export type CueId = Brand<string, "CueId">;
+/**
+ * One play request (deck.play / voice.play). A play() promise belongs to
+ * exactly one call, so a rejection can name it; a DOM `playing` event
+ * cannot and never carries it (see the pause acknowledgement rule).
+ */
+export type PlayRequestId = Brand<string, "PlayRequestId">;
 /** One load of a voice asset into the voice channel. */
 export type VoiceLoadId = Brand<string, "VoiceLoadId">;
 /** One asynchronous operation requested by the core (prepare, lyrics, cue...). */

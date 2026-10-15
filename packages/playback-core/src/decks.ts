@@ -1,4 +1,4 @@
-import { DECK_IDS, extrapolatePosition, readinessAtLeast, type DeckId, type DeckRole, type LoadId, type QueueItemId, type ResolvedMedia } from "@claudio/contracts";
+import { DECK_IDS, extrapolatePosition, readinessAtLeast, type DeckId, type DeckRole, type LoadId, type PlayRequestId, type QueueItemId, type ResolvedMedia } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
 import { resetDeck, type DeckState } from "./state.js";
 
@@ -49,7 +49,8 @@ export function loadDeck(
     duration: options.media.duration,
     gain: options.gain,
     wantPlaying: options.wantPlaying,
-    pauseAwaited: false,
+    playId: null,
+    pausesAwaited: 0,
     seekPendingMs: null
   } satisfies Partial<DeckState>);
   ctx.emit({ type: "deck.load", deck: deck.id, loadId, itemId: options.itemId, media: options.media, startAtMs: options.startAtMs });
@@ -65,13 +66,14 @@ export function playDeck(ctx: StepContext, deck: DeckState): void {
 
 export function requestPlay(ctx: StepContext, deck: DeckState): void {
   if (deck.loadId === null) return;
-  ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId });
+  deck.playId = ctx.id<PlayRequestId>("play");
+  ctx.emit({ type: "deck.play", deck: deck.id, loadId: deck.loadId, playId: deck.playId });
 }
 
 export function pauseDeck(ctx: StepContext, deck: DeckState): void {
   if (deck.loadId === null) return;
-  // A deck seen running owes one `paused`; earlier facts until then predate this pause.
-  if (deck.status === "playing" || deck.status === "waiting") deck.pauseAwaited = true;
+  // Every deck.pause is acknowledged once; until then playing/waiting predate it.
+  deck.pausesAwaited += 1;
   ctx.emit({ type: "deck.pause", deck: deck.id, loadId: deck.loadId });
 }
 

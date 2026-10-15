@@ -3,13 +3,16 @@ import type {
   DeckSnapshot,
   DisplayItem,
   LyricsView,
+  NarrationSnapshot,
   PlaybackSnapshot,
   QueueItemId,
   ResolvedMedia,
   TransportStatus,
   VoiceSnapshot
 } from "@claudio/contracts";
+import { spokenDurationMs } from "@claudio/contracts";
 import type { PlaybackState } from "./state.js";
+import { narrationReplayBlock } from "./voice.js";
 
 type DeckView = PlaybackState["decks"][DeckId];
 
@@ -62,7 +65,8 @@ function displayOf(state: PlaybackState): DisplayItem {
   const cue = state.cue;
   const phase = state.transition?.phase;
   // Subtitles switch to the voice once it was confirmed playing, not when voice.play was issued.
-  const voiceHeard = cue !== null && cue.everSpoke && (cue.status === "speaking" || cue.status === "waiting" || cue.status === "paused");
+  // A manual replay never takes the display: lyrics keep following the music, the DJ panel reads `voice`.
+  const voiceHeard = cue !== null && cue.origin === "transition" && cue.everSpoke && (cue.status === "speaking" || cue.status === "waiting" || cue.status === "paused");
   if (cue && voiceHeard && (phase === "talking" || phase === "overlapping")) {
     return {
       kind: "voice",
@@ -92,7 +96,9 @@ function voiceOf(state: PlaybackState): VoiceSnapshot | null {
   return {
     cueId: cue.binding.cueId,
     transitionId: cue.binding.transitionId,
+    origin: cue.origin,
     status: cue.status,
+    pausedBy: cue.status === "paused" ? cue.pausedBy : null,
     voiceLoadId: cue.voiceLoadId,
     clock: cue.clock,
     scriptText: cue.asset?.script.text ?? null,
@@ -100,8 +106,30 @@ function voiceOf(state: PlaybackState): VoiceSnapshot | null {
   };
 }
 
-/** Read-only projection for UI/stage/observers. */
-export function toSnapshot(state: PlaybackState): PlaybackSnapshot {
+function narrationOf(state: PlaybackState, now: number): NarrationSnapshot {
+  const retained = state.retainedNarration;
+  const block = narrationReplayBlock(state, now);
+  const view =
+    retained && state.program && retained.binding.toItemId === state.program.item.itemId
+      ? {
+          itemId: retained.binding.toItemId,
+          cueId: retained.binding.cueId,
+          transitionId: retained.binding.transitionId,
+          scriptText: retained.asset.script.text,
+          subtitle: retained.asset.script.subtitle,
+          spokenMs: spokenDurationMs(retained.asset.voice),
+          expiresAt: retained.asset.voice.stream.expiresAt
+        }
+      : null;
+  return { retained: view, replay: block === null ? { available: true } : { available: false, reason: block } };
+}
+
+/**
+ * Read-only projection for UI/stage/observers. Expiry-dependent fields
+ * (narration.replay) are judged at `now`, by default the clock of the latest
+ * accepted input.
+ */
+export function toSnapshot(state: PlaybackState, now: number = state.steppedAt): PlaybackSnapshot {
   const program = state.program;
   const programDeck = program?.deck ? state.decks[program.deck] : null;
   return {
@@ -119,6 +147,7 @@ export function toSnapshot(state: PlaybackState): PlaybackSnapshot {
       : null,
     decks: { A: deckSnapshot(state.decks.A), B: deckSnapshot(state.decks.B) },
     voice: voiceOf(state),
+    narration: narrationOf(state, now),
     transition: state.transition
       ? {
           transitionId: state.transition.transitionId,

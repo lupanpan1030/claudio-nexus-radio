@@ -1,23 +1,15 @@
 import { DECK_IDS, type OperationId, type PlaybackCommand, type QueueItem, type QueueItemId, type QueueEntryRequest } from "@claudio/contracts";
 import type { StepContext } from "./context.js";
-import { cancelCue, resumeCue } from "./cue.js";
+import { cancelCue, cancelTransitionCue, resumeCue } from "./cue.js";
+import { isReservableIdFactory } from "./ids.js";
 import { holdDeck, requestPlay, seekDeck, setGain, unloadDeck } from "./decks.js";
 import { dropLyrics } from "./lyrics.js";
 import { dropPrep } from "./prep.js";
-import {
-  activateProgram,
-  advance,
-  completeAndAdvance,
-  departureOutcome,
-  loadProgramIfResolved,
-  maybeCompleteOverlap,
-  pauseTransport,
-  planAhead,
-  releaseDuck,
-  retireProgram
-} from "./program.js";
+import { activateProgram, advance, departureOutcome, loadProgramIfResolved, pauseTransport, planAhead, retireProgram } from "./program.js";
 import { findEntry, insertEntries, moveToFront, nextEntry, removeEntry } from "./queue.js";
 import { cancelTransition, modeFor, requestNarration } from "./transition.js";
+import type { CoreState, QueueEntry } from "./state.js";
+import { pauseVoice, replayNarration, resumeVoice, stopTransitionVoice, stopVoice } from "./voice.js";
 
 /** Applies one user intent. Local effects (pause/stop) never wait on the network. */
 export function applyCommand(ctx: StepContext, command: PlaybackCommand): void {
@@ -26,6 +18,8 @@ export function applyCommand(ctx: StepContext, command: PlaybackCommand): void {
       return select(ctx, command.target);
     case "enqueue":
       return enqueue(ctx, command.entries, command.position);
+    case "replace-queue":
+      return replaceQueue(ctx, command.entries, command.autoplay);
     case "remove":
       return remove(ctx, command.itemId);
     case "next":
@@ -45,17 +39,72 @@ export function applyCommand(ctx: StepContext, command: PlaybackCommand): void {
       return emitVolume(ctx);
     case "set-dj-enabled":
       return setDjEnabled(ctx, command.enabled);
+    case "voice.replay":
+      return replayNarration(ctx);
+    case "voice.stop":
+      return stopVoice(ctx);
+    case "voice.pause":
+      return pauseVoice(ctx);
+    case "voice.resume":
+      return resumeVoice(ctx);
   }
 }
 
-function createItem(ctx: StepContext, request: QueueEntryRequest): QueueItem {
-  return {
-    itemId: ctx.id<QueueItemId>("item"),
+function hasKey(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+/** Whether the core still knows `itemId` anywhere (live partitions, receipts, history). */
+function itemIdKnown(s: CoreState, itemId: QueueItemId): boolean {
+  if (s.program?.item.itemId === itemId || findEntry(s, itemId)) return true;
+  if (DECK_IDS.some((id) => s.decks[id].itemId === itemId)) return true;
+  if (hasKey(s.prep, itemId) || hasKey(s.lyrics, itemId) || hasKey(s.receipts, itemId)) return true;
+  const pairs = [s.transition, s.reusableCue, s.retainedNarration?.binding, s.cue?.binding, s.parkedCue?.binding];
+  if (pairs.some((pair) => pair && (pair.fromItemId === itemId || pair.toItemId === itemId))) return true;
+  return s.history.some((entry) => entry.item.itemId === itemId);
+}
+
+/**
+ * Items for one command, or null (noted, nothing changed) when any supplied
+ * id is unacceptable. The whole batch is checked before anything is claimed
+ * or generated: unique within the batch, unknown to the core, and an
+ * unclaimed reservation of the injected factory. Entries without an id get
+ * a fresh one.
+ */
+function createItems(ctx: StepContext, requests: readonly QueueEntryRequest[]): QueueItem[] | null {
+  const supplied = requests.flatMap((request) => (request.itemId === undefined ? [] : [request.itemId]));
+  if (supplied.length > 0) {
+    const ids = ctx.env.ids;
+    if (!isReservableIdFactory(ids)) {
+      ctx.note("ignored", "supplied itemId needs a reservable id factory");
+      return null;
+    }
+    const seen = new Set<string>();
+    for (const itemId of supplied) {
+      const problem = seen.has(itemId)
+        ? "repeated in the command"
+        : itemIdKnown(ctx.s, itemId)
+          ? "already used"
+          : !ids.isReserved(itemId)
+            ? "not an unclaimed reservation"
+            : null;
+      if (problem) {
+        ctx.note("ignored", `supplied itemId ${itemId} ${problem}; command not applied`);
+        return null;
+      }
+      seen.add(itemId);
+    }
+    for (const itemId of supplied) {
+      if (!ids.claim(itemId)) throw new Error(`id factory refused to claim ${itemId} it reported as reserved`);
+    }
+  }
+  return requests.map((request) => ({
+    itemId: request.itemId ?? ctx.id<QueueItemId>("item"),
     track: request.track,
     display: request.display,
     origin: request.origin,
     enqueuedAt: ctx.now
-  };
+  }));
 }
 
 /** Items that must stay ahead of "next" insertions. */
@@ -71,7 +120,8 @@ function select(ctx: StepContext, target: Extract<PlaybackCommand, { type: "sele
   const { s } = ctx;
   let itemId: QueueItemId;
   if (target.kind === "track") {
-    const item = createItem(ctx, target.entry);
+    const item = createItems(ctx, [target.entry])?.[0];
+    if (!item) return;
     s.queue.unshift({ item, reservation: "none", lastError: null });
     itemId = item.itemId;
   } else {
@@ -98,12 +148,69 @@ function select(ctx: StepContext, target: Extract<PlaybackCommand, { type: "sele
 function enqueue(ctx: StepContext, requests: readonly QueueEntryRequest[], position: "next" | "end"): void {
   if (requests.length === 0) return ctx.note("ignored", "nothing to enqueue");
   const { s } = ctx;
-  insertEntries(s, requests.map((request) => createItem(ctx, request)), position, lockedIds(ctx));
+  const items = createItems(ctx, requests);
+  if (!items) return;
+  insertEntries(s, items, position, lockedIds(ctx));
   if (!s.program && s.intent === "play") {
     const head = nextEntry(s);
     if (head) return activateProgram(ctx, head);
   }
   planAhead(ctx);
+}
+
+/**
+ * One atomic queue replacement (see the contract). Load-only keeps the
+ * program and an executing transition's target and never starts playback;
+ * autoplay cancels any transition once and makes entries[0] the program.
+ */
+function replaceQueue(ctx: StepContext, requests: readonly QueueEntryRequest[], autoplay: boolean): void {
+  const { s } = ctx;
+  if (autoplay && requests.length === 0) return ctx.note("ignored", "nothing to play");
+  const items = createItems(ctx, requests);
+  if (!items) return;
+  if (!autoplay) {
+    dropWaiting(ctx, new Set(lockedIds(ctx)));
+    insertEntries(s, items, "end", []);
+    if (!s.program && s.intent === "play") {
+      // Exhausted: loading a list is not a request to play it.
+      s.intent = "stop";
+      ctx.note("decision", "list loaded while exhausted; waits for resume");
+    }
+    return planAhead(ctx);
+  }
+  s.intent = "play";
+  s.blocked = false;
+  const outcome = departureOutcome(ctx);
+  if (s.transition) cancelTransition(ctx, "skip", { keepUnspokenAsset: false });
+  dropWaiting(ctx, new Set(s.program ? [s.program.item.itemId] : []));
+  const entries = items.map((item): QueueEntry => ({ item, reservation: "none", lastError: null }));
+  s.queue.unshift(...entries);
+  const first = entries[0]!;
+  if (s.program) advance(ctx, outcome, first);
+  else activateProgram(ctx, first);
+}
+
+/** Drop every queued item not in `keep`, with its transition, standby deck, preparation, lyrics and narration. */
+function dropWaiting(ctx: StepContext, keep: ReadonlySet<QueueItemId>): void {
+  const { s } = ctx;
+  const dropped = s.queue.filter((entry) => !keep.has(entry.item.itemId)).map((entry) => entry.item.itemId);
+  if (dropped.length === 0) return;
+  const gone = new Set(dropped);
+  const transition = s.transition;
+  if (transition && gone.has(transition.toItemId)) cancelTransition(ctx, "queue-changed", { keepUnspokenAsset: false });
+  for (const itemId of dropped) {
+    for (const id of DECK_IDS) {
+      const deck = s.decks[id];
+      if (deck.itemId === itemId && deck.role !== "program" && deck.role !== "outgoing") unloadDeck(ctx, deck);
+    }
+    removeEntry(s, itemId);
+    dropPrep(ctx, itemId);
+    dropLyrics(ctx, itemId);
+  }
+  const reusable = s.reusableCue;
+  if (reusable && (gone.has(reusable.fromItemId) || gone.has(reusable.toItemId))) s.reusableCue = null;
+  const retained = s.retainedNarration;
+  if (retained && gone.has(retained.binding.toItemId)) s.retainedNarration = null;
 }
 
 function remove(ctx: StepContext, itemId: QueueItemId): void {
@@ -185,8 +292,10 @@ function seek(ctx: StepContext, positionMs: number): void {
   if (deck.status === "ended") {
     deck.status = "paused";
     deck.wantPlaying = true;
-    if (s.intent === "play") requestPlay(ctx, deck);
   }
+  // The element may have reached its end (paused) without the core knowing yet; asking
+  // again costs nothing on a rolling element and keeps the seek from landing paused.
+  if (s.intent === "play" && deck.wantPlaying) requestPlay(ctx, deck);
   planAhead(ctx);
 }
 
@@ -194,7 +303,9 @@ function stop(ctx: StepContext): void {
   const { s } = ctx;
   if (s.transition) cancelTransition(ctx, "stop", { keepUnspokenAsset: false });
   cancelCue(ctx, { keepUnspokenAsset: false });
+  s.parkedCue = null;
   s.reusableCue = null;
+  s.retainedNarration = null;
   const program = s.program;
   if (program) {
     if (program.started) retireProgram(ctx, "stopped");
@@ -242,12 +353,13 @@ function setDjEnabled(ctx: StepContext, enabled: boolean): void {
   }
   switch (transition.phase) {
     case "planned":
-      cancelCue(ctx, { keepUnspokenAsset: true });
+      // A manual replay is the listener's explicit request and keeps playing.
+      cancelTransitionCue(ctx, { keepUnspokenAsset: true });
       transition.cueId = null;
       transition.mode = "direct";
       return;
     case "prerolling": {
-      cancelCue(ctx, { keepUnspokenAsset: true });
+      cancelTransitionCue(ctx, { keepUnspokenAsset: true });
       const standby = Object.values(s.decks).find((deck) => deck.itemId === transition.toItemId);
       if (standby) holdDeck(ctx, standby);
       transition.phase = "planned";
@@ -256,12 +368,8 @@ function setDjEnabled(ctx: StepContext, enabled: boolean): void {
       return;
     }
     case "talking":
-      cancelCue(ctx, { keepUnspokenAsset: false });
-      return completeAndAdvance(ctx);
     case "overlapping":
-      cancelCue(ctx, { keepUnspokenAsset: false });
-      releaseDuck(ctx);
-      return maybeCompleteOverlap(ctx);
+      return stopTransitionVoice(ctx);
     default:
       return;
   }

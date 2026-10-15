@@ -29,6 +29,7 @@ export function step(state: PlaybackState, input: CoreInput, env: CoreEnv): Step
     return { state, effects: [], notes: ctx.notes };
   }
   ctx.s.version = state.version + 1;
+  ctx.s.steppedAt = env.now;
   return { state: deepFreeze(ctx.s), effects: ctx.effects, notes: ctx.notes };
 }
 

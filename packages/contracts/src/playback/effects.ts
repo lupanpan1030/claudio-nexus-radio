@@ -4,6 +4,7 @@ import type {
   IdempotencyKey,
   LoadId,
   OperationId,
+  PlayRequestId,
   QueueItemId,
   RecordingId,
   SourceRevision,
@@ -47,8 +48,28 @@ export type PlaybackEffect =
   /** Best-effort abort. The core has already settled the operation as cancelled. */
   | { readonly type: "operation.cancel"; readonly opId: OperationId; readonly kind: OperationKind }
   | { readonly type: "deck.load"; readonly deck: DeckId; readonly loadId: LoadId; readonly itemId: QueueItemId; readonly media: ResolvedMedia; readonly startAtMs: number }
-  | { readonly type: "deck.play"; readonly deck: DeckId; readonly loadId: LoadId }
-  /** The resulting `paused` fact (if the element was not already paused) carries requested=true. */
+  /**
+   * `playId` is echoed only by a `play-rejected` for the promise of this very
+   * call. An executor that skips the native play() (element already rolling)
+   * reports nothing for it.
+   */
+  | { readonly type: "deck.play"; readonly deck: DeckId; readonly loadId: LoadId; readonly playId: PlayRequestId }
+  /**
+   * Answered by exactly one `paused` fact with requested=true (the pause
+   * acknowledgement), unless the load is unloaded first:
+   *  - element.paused was false: the DOM `pause` event this call causes;
+   *  - element.paused was already true but a DOM `pause` event is still owed
+   *    (the element was unpaused, by the executor's own native play() or a
+   *    dispatched `play` event, more recently than the last dispatched
+   *    `pause` event): that owed event;
+   *  - otherwise (already paused, nothing owed, e.g. a play deferred until
+   *    the audio context unlocks and now cancelled): report it at once from
+   *    the synchronous element state (positionMs, atEnd = element.ended).
+   * The core treats `playing`/`waiting` of the load as predating the pause
+   * until every acknowledgement arrived. DOM events of one element are
+   * dispatched in order, so an owed `pause` event is a real barrier: a
+   * `playing` queued before it belongs to an earlier play.
+   */
   | { readonly type: "deck.pause"; readonly deck: DeckId; readonly loadId: LoadId }
   /** Answered by a `seeked` fact, also when the executor had to defer it until metadata. */
   | { readonly type: "deck.seek"; readonly deck: DeckId; readonly loadId: LoadId; readonly positionMs: number }
@@ -56,7 +77,8 @@ export type PlaybackEffect =
   | { readonly type: "deck.unload"; readonly deck: DeckId; readonly loadId: LoadId }
   | { readonly type: "cue.request"; readonly opId: OperationId; readonly binding: CueBinding; readonly from: TrackRef; readonly to: TrackRef }
   | { readonly type: "voice.load"; readonly cueId: CueId; readonly voiceLoadId: VoiceLoadId; readonly asset: CueAsset }
-  | { readonly type: "voice.play"; readonly cueId: CueId; readonly voiceLoadId: VoiceLoadId }
+  | { readonly type: "voice.play"; readonly cueId: CueId; readonly voiceLoadId: VoiceLoadId; readonly playId: PlayRequestId }
+  /** Acknowledged exactly like deck.pause. */
   | { readonly type: "voice.pause"; readonly cueId: CueId; readonly voiceLoadId: VoiceLoadId }
   /** Stop and release the voice element; the cue will not resume. */
   | { readonly type: "voice.stop"; readonly cueId: CueId; readonly voiceLoadId: VoiceLoadId }

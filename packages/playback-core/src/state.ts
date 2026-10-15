@@ -2,6 +2,7 @@ import type {
   CueAsset,
   CueBinding,
   CueId,
+  CueOrigin,
   CueStatus,
   DeckId,
   DeckRole,
@@ -14,6 +15,7 @@ import type {
   MediaReadiness,
   OperationId,
   OperationKind,
+  PlayRequestId,
   QueueItem,
   QueueItemId,
   ReceiptStatus,
@@ -26,6 +28,7 @@ import type {
   TransitionMode,
   TransitionPhase,
   VoiceLoadId,
+  VoicePausedBy,
   LoadId
 } from "@claudio/contracts";
 
@@ -94,12 +97,16 @@ export interface DeckState {
   gain: number;
   /** Whether this deck should sound while the transport is playing. */
   wantPlaying: boolean;
+  /** Latest deck.play of this load; a rejection naming another play is stale. */
+  playId: PlayRequestId | null;
   /**
-   * The core asked a deck it had seen playing/waiting to pause, and that
-   * `paused` has not arrived. Media facts are ordered per element, so a
-   * playing/waiting reported meanwhile happened before the pause and confirms nothing.
+   * deck.pause effects of this load whose acknowledgement (`paused` with
+   * requested=true, exactly one per effect) has not arrived. Media facts are
+   * ordered per element, so a playing/waiting reported meanwhile predates
+   * the pause and confirms nothing, whether or not the core had seen the
+   * deck playing.
    */
-  pauseAwaited: boolean;
+  pausesAwaited: number;
   /**
    * Target of a deck.seek whose `seeked` has not arrived. Positions and
    * `ended` reported meanwhile describe the element before the seek.
@@ -130,6 +137,8 @@ export interface ItemPrep {
 }
 
 export interface CueState {
+  /** "manual": an explicit replay of retained narration; never drives a transition. */
+  origin: CueOrigin;
   binding: CueBinding;
   opId: OperationId | null;
   status: CueStatus;
@@ -139,6 +148,34 @@ export interface CueState {
   clock: MediaClockSample | null;
   /** Voice confirmed playing at least once; never restarted from scratch. */
   everSpoke: boolean;
+  /** Set while status is "paused": a transport resume only continues "transport". */
+  pausedBy: VoicePausedBy | null;
+  /** Latest voice.play; a rejection naming another play is stale. */
+  playId: PlayRequestId | null;
+}
+
+/**
+ * Narration that was really spoken into `binding.toItemId` (an automatic
+ * cue that played), kept so the listener can replay it while that item is
+ * the program. Belongs to the target item, not to the program that was
+ * playing when it was spoken. Replaced wholesale, never edited in place.
+ */
+export interface RetainedNarration {
+  /** Original automatic binding; toRevision is the target's actual revision once known. */
+  readonly binding: CueBinding;
+  /** Target's actual recording once known. */
+  readonly toRecordingId: RecordingId | null;
+  readonly asset: CueAsset;
+}
+
+/**
+ * A transition's narration request still being generated while a manual
+ * replay holds the single voice channel. The operation stays in flight;
+ * its asset is parked as reusable instead of being loaded over the manual voice.
+ */
+export interface ParkedCueRequest {
+  readonly binding: CueBinding;
+  readonly opId: OperationId;
 }
 
 export interface TransitionState {
@@ -198,6 +235,10 @@ export interface CoreState {
   /** "from>to" pairs whose narration already started; never spoken again. */
   spokenPairs: string[];
   reusableCue: ReusableCue | null;
+  retainedNarration: RetainedNarration | null;
+  parkedCue: ParkedCueRequest | null;
+  /** Runtime clock of the latest accepted input; snapshots judge expiry against it by default. */
+  steppedAt: number;
   consecutiveFailures: number;
   lastFailure: ErrorInfo | null;
 }
@@ -226,7 +267,8 @@ function idleDeck(id: DeckId): DeckState {
     duration: { kind: "unknown" },
     gain: 1,
     wantPlaying: false,
-    pauseAwaited: false,
+    playId: null,
+    pausesAwaited: 0,
     seekPendingMs: null
   };
 }
@@ -257,6 +299,9 @@ export function createInitialState(options: {
     settings: { djEnabled: true, musicVolume: 1, voiceVolume: 1, muted: false, ...options.settings },
     spokenPairs: [],
     reusableCue: null,
+    retainedNarration: null,
+    parkedCue: null,
+    steppedAt: 0,
     consecutiveFailures: 0,
     lastFailure: null
   };
@@ -297,8 +342,8 @@ function resolveConfig(overrides: Partial<CoreConfig>): CoreConfig {
  * entries, program, decks, prep, transition, cue, lyrics entries, records,
  * settings) is copied one level deep; payloads it only ever replaces
  * wholesale (queue items, resolved media, cue/lyrics assets, lyrics views,
- * clock samples, durations, errors, history entries, config, reusable cue)
- * are shared by reference. The input is frozen, so an in-place edit of a
+ * clock samples, durations, errors, history entries, config, reusable cue,
+ * retained narration, parked cue request) are shared by reference. The input is frozen, so an in-place edit of a
  * shared payload throws instead of leaking into the previous state.
  */
 export function cloneState(state: PlaybackState): CoreState {
